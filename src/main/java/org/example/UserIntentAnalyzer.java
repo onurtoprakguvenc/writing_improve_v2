@@ -1,37 +1,25 @@
 package org.example;
 
-import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * JVM-yerel, sıfır-gecikmeli niyet ve dinamik bağlam görüş alanı (FOV) motoru.
- * Kelime sınırları ile yanlış pozitifleri önler, tırnak içi alıntıları tam metinde arar
- * ve meta yönlendiricileri temiz talimattan ayıklar.
- */
 public class UserIntentAnalyzer {
 
     public enum IntentType {
-        CONTINUE,   // İleriye doğru tek beat yürüt
-        REVISE,     // Seçili/kapsam içindeki parçayı dönüştür
-        PROOFREAD,  // Üsluba dokunmadan yazım kusurlarını temizle
-        CONSULT     // Metne dokunma; mantık/lore analizi yap
+        CONTINUE,
+        REVISE,
+        PROOFREAD,
+        CONSULT
     }
 
     public enum ContextScope {
-        FOCUSED(1500),      // Optimum / Önerilen: Hızlı, keskin, son ~300 kelime
-        EXPANDED(5000),     // Geniş: Yakın geçmişi ve sahne girişini kapsar
-        FULL_MANUSCRIPT(-1);// Samanlıkta İğne: Tüm metin taranır
+        FOCUSED(1500),
+        EXTENDED(4000),
+        FULL_MANUSCRIPT(Integer.MAX_VALUE);
 
-        private final int maxChars;
-
-        ContextScope(int maxChars) {
-            this.maxChars = maxChars;
-        }
-
-        public int getMaxChars() {
-            return maxChars;
-        }
+        private final int charBudget;
+        ContextScope(int charBudget) { this.charBudget = charBudget; }
+        public int getCharBudget() { return charBudget; }
     }
 
     public static class AnalysisResult {
@@ -39,195 +27,113 @@ public class UserIntentAnalyzer {
         private final String cleanInstruction;
         private final String targetPassage;
         private final String effectiveContext;
-        private final double confidence;
+        private final boolean isComplexSequence;
+        private final boolean isFreshScene;
 
-        public AnalysisResult(IntentType intent, String cleanInstruction, String targetPassage, String effectiveContext, double confidence) {
+        public AnalysisResult(IntentType intent, String cleanInstruction, String targetPassage,
+                              String effectiveContext, boolean isComplexSequence, boolean isFreshScene) {
             this.intent = intent;
             this.cleanInstruction = cleanInstruction;
             this.targetPassage = targetPassage;
             this.effectiveContext = effectiveContext;
-            this.confidence = confidence;
+            this.isComplexSequence = isComplexSequence;
+            this.isFreshScene = isFreshScene;
         }
 
         public IntentType getIntent() { return intent; }
         public String getCleanInstruction() { return cleanInstruction; }
         public String getTargetPassage() { return targetPassage; }
         public String getEffectiveContext() { return effectiveContext; }
-        public double getConfidence() { return confidence; }
-
-        @Override
-        public String toString() {
-            return String.format(Locale.ROOT,
-                    "Intent: %s (Confidence: %.2f)\nTarget Passage: [%s]\nContext Window Length: %d chars\nClean Instruction: \"%s\"",
-                    intent, confidence,
-                    (targetPassage == null ? "NONE" : targetPassage),
-                    (effectiveContext == null ? 0 : effectiveContext.length()),
-                    cleanInstruction);
-        }
+        public boolean isComplexSequence() { return isComplexSequence; }
+        public boolean isFreshScene() { return isFreshScene; }
     }
 
-    // Kelime sınırı ile derlenmiş istişare kalıpları
-    private static final List<Pattern> CONSULT_PATTERNS = compileBoundaryPatterns(Arrays.asList(
-            "sence", "mantıklı mı", "uyumlu mu", "çelişki", "hatırlıyor musun", "kimdi",
-            "neden", "nasıl", "ne dersin", "alternatif", "fikir ver", "öneri", "hızlı mı",
-            "tempo", "tutarlı mı", "why", "how", "is it consistent", "does it make sense",
-            "brainstorm", "options", "analyze", "check"
-    ));
-
-    // Salt imla denetimi kalıpları
-    private static final List<Pattern> PROOFREAD_PATTERNS = compileBoundaryPatterns(Arrays.asList(
-            "yazım hatası", "yazım hatalarını", "imla", "typo", "typos", "düzelt",
-            "harf hatası", "proofread", "fix spelling", "clean typos"
-    ));
-
-    // Revizyon eylem kalıpları
-    private static final List<Pattern> REVISION_PATTERNS = compileBoundaryPatterns(Arrays.asList(
-            "değiştir", "yeniden yaz", "revize et", "daha karanlık yap", "daha sert yap",
-            "şöyle olsun", "sil", "yerine", "paragrafı yap", "cümleyi yap", "tonu arttır",
-            "rewrite", "revise", "make it darker", "replace"
-    ));
-
-    // Talimattan temizlenecek meta yönlendiriciler
-    private static final Pattern META_TARGET_CLEANER = Pattern.compile(
-            "(?i)\\b(son cümleyi|son paragrafı|bu kısmı|şu kısmı|seçili yeri|last sentence|previous line)\\b[,:]?\\s*"
+    private static final Pattern CONSULT_PATTERN = Pattern.compile(
+            "\\b(sence|nasıl|neden|mantıklı mı|çelişki|tutarlı mı|hata var mı|tempo|ritim|fikir|who|what|why|how|should|does it make sense)\\b|\\?",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
 
-    public AnalysisResult analyze(String rawPrompt, String selectedText, String fullEditorText) {
-        return analyze(rawPrompt, selectedText, fullEditorText, ContextScope.FOCUSED);
-    }
+    private static final Pattern PROOFREAD_PATTERN = Pattern.compile(
+            "\\b(düzelt|yazım|imla|harf|typo|noktalama|grammar|proofread)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
 
-    public AnalysisResult analyze(String rawPrompt, String selectedText, String fullEditorText, ContextScope scope) {
-        String effectiveContext = sliceContextByScope(fullEditorText, scope);
+    private static final Pattern REVISE_PATTERN = Pattern.compile(
+            "\\b(değiştir|yeniden yaz|daha sert yap|yumuşat|şöyle de|yerine|kaldır|rewrite|revise|change|replace)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
 
-        if (rawPrompt == null || rawPrompt.trim().isEmpty()) {
-            return new AnalysisResult(IntentType.CONTINUE, "", null, effectiveContext, 1.0);
-        }
+    // Sahne sınırı kontrolü (***, ---, [yeni sahne] vb.)
+    private static final Pattern SCENE_BREAK_PATTERN = Pattern.compile(
+            "(\\*{3,}|-{3,}|#{2,}|(?i)\\[(yeni sahne|scene break|chapter)\\])"
+    );
 
-        String prompt = rawPrompt.trim();
-        boolean hasExplicitSelection = (selectedText != null && !selectedText.trim().isEmpty());
+    // Çoklu olay/sekans sayacı (virgül, 'sonra', 'and then', 'ardından')
+    private static final Pattern MULTI_STEP_PATTERN = Pattern.compile(
+            "(,|\\bve\\b|\\bsonra\\b|\\bardından\\b|\\band then\\b|\\bthen\\b)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
 
-        // 1. Durum: Kullanıcı fareyle metin seçmişse (Açık Hedef)
-        if (hasExplicitSelection) {
-            if (matchesAny(prompt, PROOFREAD_PATTERNS)) {
-                return new AnalysisResult(IntentType.PROOFREAD, stripMetaTokens(prompt), selectedText.trim(), effectiveContext, 0.95);
-            }
-            if (isConsultationQuery(prompt)) {
-                return new AnalysisResult(IntentType.CONSULT, prompt, selectedText.trim(), effectiveContext, 0.90);
-            }
-            return new AnalysisResult(IntentType.REVISE, stripMetaTokens(prompt), selectedText.trim(), effectiveContext, 0.95);
-        }
+    public AnalysisResult analyze(String rawPrompt, String selectedText, String fullManuscript, ContextScope scope) {
+        String trimmedPrompt = rawPrompt == null ? "" : rawPrompt.trim();
+        boolean hasSelection = selectedText != null && !selectedText.isBlank();
+        String context = resolveContext(fullManuscript, scope);
 
-        // 2. Durum: İstişare / Soru (Metin değişmez)
-        if (isConsultationQuery(prompt)) {
-            return new AnalysisResult(IntentType.CONSULT, prompt, null, effectiveContext, 0.90);
-        }
-
-        // 3. Durum: Salt İmla Temizliği
-        if (matchesAny(prompt, PROOFREAD_PATTERNS)) {
-            return new AnalysisResult(IntentType.PROOFREAD, stripMetaTokens(prompt), effectiveContext, effectiveContext, 0.85);
-        }
-
-        // 4. Durum: Revizyon (Hedef arama ve talimat temizleme)
-        if (matchesAny(prompt, REVISION_PATTERNS) || promptContainsQuotedSnippet(prompt)) {
-            String target = resolveTarget(prompt, fullEditorText, effectiveContext);
-            String cleanInstruction = stripMetaTokens(prompt);
-            return new AnalysisResult(IntentType.REVISE, cleanInstruction, target, effectiveContext, 0.85);
-        }
-
-        // 5. Durum: İleriye Yürütme (CONTINUE)
-        return new AnalysisResult(IntentType.CONTINUE, prompt, null, effectiveContext, 0.90);
-    }
-
-    /**
-     * Tırnak içinde alıntı varsa tüm metinde arar; yoksa aktif görüş alanını baz alır.
-     */
-    private String resolveTarget(String rawPrompt, String fullEditorText, String effectiveContext) {
-        if (fullEditorText == null || fullEditorText.trim().isEmpty()) {
-            return null;
-        }
-
-        // 1. Kullanıcı prompt içinde tırnakla spesifik bir yer belirtmiş mi?
-        Matcher quoteMatcher = Pattern.compile("\"([^\"]+)\"").matcher(rawPrompt);
-        if (quoteMatcher.find()) {
-            String quotedSnippet = quoteMatcher.group(1).trim();
-            if (fullEditorText.contains(quotedSnippet)) {
-                return quotedSnippet;
+        // 1. Sahne Geçiş Kontrolü
+        boolean isFreshScene = false;
+        if (context != null && SCENE_BREAK_PATTERN.matcher(context).find()) {
+            String[] segments = SCENE_BREAK_PATTERN.split(context);
+            if (segments.length > 1) {
+                context = segments[segments.length - 1].trim();
+                isFreshScene = true;
             }
         }
 
-        // 2. Özel anahtar kelimeler ("son cümle", "son paragraf")
-        String lower = rawPrompt.toLowerCase(Locale.ROOT);
-        if (lower.contains("son cümle") || lower.contains("last sentence")) {
-            return extractLastSentence(effectiveContext);
+        // 2. Çoklu Eylem Sekansı Kontrolü
+        Matcher stepMatcher = MULTI_STEP_PATTERN.matcher(trimmedPrompt);
+        int steps = 0;
+        while (stepMatcher.find()) steps++;
+        boolean isComplexSequence = steps >= 2;
+
+        // 3. İstişare Taraması
+        if (CONSULT_PATTERN.matcher(trimmedPrompt).find() && !hasSelection) {
+            return new AnalysisResult(IntentType.CONSULT, trimmedPrompt, null, context, isComplexSequence, isFreshScene);
         }
 
-        if (lower.contains("son paragraf") || lower.contains("last paragraph")) {
-            String[] blocks = effectiveContext.trim().split("\\r?\\n{2,}");
-            return blocks[blocks.length - 1].trim();
+        // 4. İmla Taraması
+        if (PROOFREAD_PATTERN.matcher(trimmedPrompt).find()) {
+            String target = hasSelection ? selectedText : extractSafeFallbackTarget(context);
+            return new AnalysisResult(IntentType.PROOFREAD, trimmedPrompt, target, context, isComplexSequence, isFreshScene);
         }
 
-        // 3. Varsayılan hedef aktif kapsam penceresidir
-        return effectiveContext;
-    }
-
-    private String stripMetaTokens(String prompt) {
-        String cleaned = META_TARGET_CLEANER.matcher(prompt).replaceAll("").trim();
-        return cleaned.isEmpty() ? prompt : cleaned;
-    }
-
-    private boolean promptContainsQuotedSnippet(String prompt) {
-        return prompt.contains("\"") && Pattern.compile("\"[^\"]+\"").matcher(prompt).find();
-    }
-
-    private String sliceContextByScope(String fullText, ContextScope scope) {
-        if (fullText == null || fullText.trim().isEmpty()) return "";
-        String trimmed = fullText.trim();
-        if (scope == ContextScope.FULL_MANUSCRIPT || scope.getMaxChars() <= 0) return trimmed;
-        if (trimmed.length() <= scope.getMaxChars()) return trimmed;
-
-        int startIndex = trimmed.length() - scope.getMaxChars();
-        int cleanStart = trimmed.indexOf('\n', startIndex);
-        if (cleanStart != -1 && cleanStart < trimmed.length() - 100) {
-            return trimmed.substring(cleanStart + 1).trim();
+        // 5. Revizyon Taraması
+        if (hasSelection || REVISE_PATTERN.matcher(trimmedPrompt).find()) {
+            String target = hasSelection ? selectedText : extractSafeFallbackTarget(context);
+            return new AnalysisResult(IntentType.REVISE, trimmedPrompt, target, context, isComplexSequence, isFreshScene);
         }
-        return trimmed.substring(startIndex).trim();
+
+        // 6. Varsayılan Akış: Olay Örgüsü Devamı
+        return new AnalysisResult(IntentType.CONTINUE, trimmedPrompt, null, context, isComplexSequence, isFreshScene);
     }
 
-    private String extractLastSentence(String text) {
-        if (text == null || text.trim().isEmpty()) return null;
-        String trimmed = text.trim();
-        int lastPeriod = Math.max(trimmed.lastIndexOf('.'), Math.max(trimmed.lastIndexOf('!'), trimmed.lastIndexOf('?')));
-        if (lastPeriod > 0) {
-            int secondLastPeriod = Math.max(
-                    trimmed.lastIndexOf('.', lastPeriod - 1),
-                    Math.max(trimmed.lastIndexOf('!', lastPeriod - 1), trimmed.lastIndexOf('?', lastPeriod - 1))
-            );
-            if (secondLastPeriod != -1) {
-                return trimmed.substring(secondLastPeriod + 1).trim();
+    private String resolveContext(String fullText, ContextScope scope) {
+        if (fullText == null || fullText.isBlank()) return "";
+        if (scope == ContextScope.FULL_MANUSCRIPT) return fullText;
+        int budget = scope.getCharBudget();
+        if (fullText.length() <= budget) return fullText;
+        return fullText.substring(fullText.length() - budget);
+    }
+
+    // Seçimsiz revizyonda tüm bloğu ezmek yerine sadece son diyalog veya cümleyi hedef alma
+    private String extractSafeFallbackTarget(String text) {
+        if (text == null || text.isBlank()) return "";
+        String[] lines = text.trim().split("\\r?\\n");
+        for (int i = lines.length - 1; i >= 0; i--) {
+            String line = lines[i].trim();
+            if (!line.isEmpty()) {
+                return line;
             }
         }
-        return trimmed;
-    }
-
-    private boolean isConsultationQuery(String prompt) {
-        if (prompt.contains("?")) return true;
-        return matchesAny(prompt, CONSULT_PATTERNS);
-    }
-
-    private static List<Pattern> compileBoundaryPatterns(List<String> rawPatterns) {
-        List<Pattern> compiled = new ArrayList<>();
-        for (String raw : rawPatterns) {
-            compiled.add(Pattern.compile("(?i)\\b" + Pattern.quote(raw) + "\\b"));
-        }
-        return compiled;
-    }
-
-    private boolean matchesAny(String input, List<Pattern> patterns) {
-        for (Pattern p : patterns) {
-            if (p.matcher(input).find()) {
-                return true;
-            }
-        }
-        return false;
+        return text;
     }
 }

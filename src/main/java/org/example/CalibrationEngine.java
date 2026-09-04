@@ -21,37 +21,20 @@ public class CalibrationEngine {
     private final OkHttpClient httpClient;
     private final Gson gson;
 
-    // Default verified model. Overridable per-instance via the
-    // (apiKey, modelName) constructor without touching call sites that
-    // use the single-arg constructor.
     private static final String DEFAULT_MODEL_NAME = "gemini-3.5-flash";
     private static final String BASE_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse";
 
-    // Safe override bounds for maxOutputTokens. Floor raised to 600 to
-    // prevent mid-sentence truncation on complete narrative beats.
     private static final int MAX_TOKENS_FLOOR = 600;
     private static final int MAX_TOKENS_CEILING = 800;
 
-    // Cynicism threshold above which blunt-verb / anti-moralizing enforcement kicks in.
     private static final double CYNICISM_HARDNESS_THRESHOLD = 0.6;
-
-    // Number of trailing non-empty lines pulled verbatim into the structural
-    // few-shot anchor. Verbatim replication needs no classification step,
-    // so it never misparses embedded cues like "so sister...(slices her face)...".
     private static final int STRUCTURAL_ANCHOR_LINE_WINDOW = 3;
 
-    /**
-     * Uses the default verified model (gemini-3.8-flash).
-     */
     public CalibrationEngine(String apiKey) {
         this(apiKey, DEFAULT_MODEL_NAME);
     }
 
-    /**
-     * Explicit key + model configuration, for dynamic switching between
-     * verified endpoints without editing source.
-     */
     public CalibrationEngine(String apiKey, String modelName) {
         this.apiKey = apiKey;
         this.modelName = (modelName != null && !modelName.isBlank()) ? modelName : DEFAULT_MODEL_NAME;
@@ -67,27 +50,10 @@ public class CalibrationEngine {
         return String.format(BASE_URL_TEMPLATE, modelName);
     }
 
-    /**
-     * Backward-compatible entry point. Defaults to K2_BALANCED tier.
-     */
     public String generateNextDraft(String userContext, String plotPoint) throws IOException {
         return generateNextDraft(userContext, plotPoint, AnalysisTier.K2_BALANCED);
     }
 
-    /**
-     * Primary blocking entry point (Katman 2 -> Katman 3 bridge).
-     *
-     * Runs the local shadow analysis core against the raw user context to
-     * produce a NarrativeState, then uses that state to compile a parametric
-     * constraint matrix and structural syntax anchor before executing the
-     * SSE call. thinkingConfig.thinkingBudget is forced to 0 so the entire
-     * maxOutputTokens budget goes to story text instead of internal
-     * reasoning tokens.
-     *
-     * @param rawUserContext the active text window (last N words/chars) the author is writing in
-     * @param plotPoint      the next beat the author wants advanced
-     * @param tier           local analysis depth; defaults to K2_BALANCED when null
-     */
     public String generateNextDraft(String rawUserContext, String plotPoint, AnalysisTier tier) throws IOException {
         AnalysisTier effectiveTier = (tier != null) ? tier : AnalysisTier.K2_BALANCED;
         NarrativeState state = LocalShadowCore.analyze(rawUserContext, effectiveTier);
@@ -141,9 +107,7 @@ public class CalibrationEngine {
                                     }
                                 }
                             }
-                        } catch (Exception ignored) {
-                            // Parse edilemeyen SSE satırlarını atla
-                        }
+                        } catch (Exception ignored) {}
                     }
                 }
             }
@@ -152,19 +116,6 @@ public class CalibrationEngine {
         }
     }
 
-    /**
-     * Streaming variant. Identical request assembly and identical SSE
-     * line-parsing logic to {@link #generateNextDraft(String, String, AnalysisTier)},
-     * except each parsed text delta is pushed to {@code onToken} the moment
-     * it is decoded from the SSE stream, instead of being buffered until the
-     * connection closes. thinkingConfig.thinkingBudget is forced to 0 here
-     * as well — this is what eliminates the 45s reasoning-token TTFB stall.
-     *
-     * Blocking call — the caller is responsible for dispatching this onto a
-     * background thread if invoked from a UI context.
-     *
-     * @throws IOException on network failure or non-2xx response — no swallowed errors, no fallback text
-     */
     public void streamNextDraft(String rawUserContext, String plotPoint, AnalysisTier tier, Consumer<String> onToken) throws IOException {
         AnalysisTier effectiveTier = (tier != null) ? tier : AnalysisTier.K2_BALANCED;
         NarrativeState state = LocalShadowCore.analyze(rawUserContext, effectiveTier);
@@ -219,48 +170,37 @@ public class CalibrationEngine {
                                     }
                                 }
                             }
-                        } catch (Exception ignored) {
-                            // Parse edilemeyen SSE satırlarını atla
-                        }
+                        } catch (Exception ignored) {}
                     }
                 }
             }
         }
     }
 
-    /**
-     * Shared request-body assembly for both the blocking and streaming entry
-     * points, so the payload — including the thinkingConfig suppression —
-     * can never drift between the two call paths.
-     */
     private JsonObject buildRequestPayload(NarrativeState state, String rawUserContext, String plotPoint) {
         String systemInstructionText = buildParametricConstraintMatrix(state, rawUserContext);
         String userPromptText = String.format("ACTIVE CONTEXT:\n%s\n\nNEXT PLOT POINT:\n%s", rawUserContext, plotPoint);
 
         JsonObject rootJson = new JsonObject();
 
-        // 1. Sistem Kısıtları (parametric constraint matrix, not prose)
         JsonObject systemInstruction = new JsonObject();
         JsonArray systemParts = new JsonArray();
         JsonObject systemPart = new JsonObject();
         systemPart.addProperty("text", systemInstructionText);
         systemParts.add(systemPart);
         systemInstruction.add("parts", systemParts);
-        rootJson.add("system_instruction", systemInstruction);
+        rootJson.add("systemInstruction", systemInstruction);
 
-        // 2. Kullanıcı Girdisi
         JsonArray contents = new JsonArray();
         JsonObject contentObj = new JsonObject();
         JsonArray userParts = new JsonArray();
-        JsonObject userPart = new JsonObject();
-        userPart.addProperty("text", userPromptText);
-        userParts.add(userPart);
+        JsonObject userText = new JsonObject();
+        userText.addProperty("text", userPromptText);
+        userParts.add(userText);
         contentObj.add("parts", userParts);
         contents.add(contentObj);
         rootJson.add("contents", contents);
 
-        // 3. Üretim Parametreleri — dynamically bound to NarrativeState,
-        //    with thinkingConfig forced to zero budget.
         JsonObject generationConfig = new JsonObject();
         generationConfig.addProperty("temperature", state.getRecommendedTemperature());
         generationConfig.addProperty("maxOutputTokens", resolveMaxOutputTokens(state));
@@ -274,10 +214,6 @@ public class CalibrationEngine {
         return rootJson;
     }
 
-    /**
-     * Clamps the locally-recommended token budget into the safe override
-     * window (600–800).
-     */
     private int resolveMaxOutputTokens(NarrativeState state) {
         int recommended = state.getRecommendedMaxTokens();
         if (recommended < MAX_TOKENS_FLOOR) return MAX_TOKENS_FLOOR;
@@ -285,16 +221,6 @@ public class CalibrationEngine {
         return recommended;
     }
 
-    // ------------------------------------------------------------------
-    // Parametric Constraint Matrix + Structural Anchoring
-    // ------------------------------------------------------------------
-
-    /**
-     * Compiles a dense, non-conversational key-value constraint lattice
-     * directly from NarrativeState metrics, plus a structural syntax anchor
-     * extracted from the author's own final lines. No hardcoded story
-     * content, no fallback prose.
-     */
     private String buildParametricConstraintMatrix(NarrativeState state, String rawUserContext) {
         StringBuilder sb = new StringBuilder();
 
@@ -303,8 +229,16 @@ public class CalibrationEngine {
 
         sb.append("[CONSTRAINT_MATRIX]\n");
 
-        int velocityCeiling = Math.max(3, (int) Math.round(state.getAvgWordsPerSentence()));
-        sb.append("VELOCITY=").append(velocityCeiling).append(" | RULE=hard_ceiling_words_per_sentence\n");
+        // Sert kelime sınırı yerine tam cümle ve parantezli eyleme izin veren nefes aralığı
+        // UserIntentAnalyzer'dan gelen çoklu eylem sinyali kontrol edilir
+        int baseVelocity = Math.max(12, (int) Math.round(state.getAvgWordsPerSentence() * 3.0));
+        if (rawUserContext.contains("---") || rawUserContext.contains("***")) {
+            sb.append("SCENE_TRANSITION=detected | RULE=reset_emotional_inertia\n");
+        }
+
+// Birden fazla eylem isteniyorsa kelime tavanını iki katına çıkar ve çoklu adıma izin ver
+        sb.append("TARGET_VELOCITY=").append(baseVelocity * 2).append(" | RULE=allow_complete_action_and_dialogue_clause\n");
+        sb.append("ALLOW_MULTI_STEP_RESOLUTION=true\n");
 
         sb.append("BALANCE.DIALOGUE_RATIO=").append(formatRatio(state.getDialogueRatio()))
                 .append(" | BALANCE.ACTION_RATIO=").append(formatRatio(state.getStageDirectionRatio()))
@@ -339,7 +273,8 @@ public class CalibrationEngine {
         sb.append("<<<\n").append(anchorSample).append("\n>>>\n");
         sb.append("RULE: Replicate the EXACT syntax, quote style, casing, and intra-dialogue bracket/parenthesis rhythm shown in SAMPLE. ");
         sb.append("If SAMPLE embeds an action cue inside a quoted line (e.g. dialogue containing an inline parenthetical), preserve that exact embedding — do NOT extract it into a separate stage-direction line, and do NOT normalize it into standard literary prose. ");
-        sb.append("Match punctuation placement and letter casing exactly as written, including any lowercase or unconventional styling. Continue the pattern; do not correct it.\n\n");
+        sb.append("Match punctuation placement and letter casing exactly as written, including any lowercase or unconventional styling. Continue the pattern; do not correct it. ");
+        sb.append("MANDATORY: Always close open quotation marks and finish the parenthetical action completely before ending output.\n\n");
 
         sb.append("[HARD_STOP_RULES]\n");
         sb.append("NO_CONVERSATIONAL_COMMENTARY=true\n");
@@ -351,14 +286,6 @@ public class CalibrationEngine {
         return sb.toString();
     }
 
-    /**
-     * Extracts the final 2-3 non-empty lines of rawUserContext VERBATIM —
-     * exact punctuation, casing, quote style, and embedded bracket/paren
-     * rhythm preserved as-written. No classification, no regex, no
-     * normalization. This is what lets the model replicate non-standard
-     * syntax (e.g. an action cue embedded inside a quote) that a rigid
-     * line-shape classifier would otherwise misparse or discard.
-     */
     private String extractStructuralAnchor(String rawUserContext) {
         if (rawUserContext == null || rawUserContext.trim().isEmpty()) {
             return "(no prior lines available — no anchor sample)";
