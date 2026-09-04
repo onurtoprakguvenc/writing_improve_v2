@@ -21,7 +21,7 @@ public class CalibrationEngine {
     private final OkHttpClient httpClient;
     private final Gson gson;
 
-    private static final String DEFAULT_MODEL_NAME = "gemini-3.5-flash";
+    private static final String DEFAULT_MODEL_NAME = "gemini-3.6-flash";
     private static final String BASE_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse";
 

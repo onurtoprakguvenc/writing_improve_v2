@@ -1,86 +1,102 @@
 package org.example;
 
+import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Scanner;
 
 /**
- * Terminal tabanlı minimalist prompt ve editör arayüzü.
- * Sol editör metnini ve sağ prompt çubuğunu simüle eder.
+ * Günlük kullanım için bağımsız CLI çalışma alanı.
+ * Metni konsoldan veya dosyadan alır, işler ve panoya kopyalayarak kapatır.
  */
 public class InteractiveApp {
 
-    private static String editorManuscript =
-            "(intense fight moment)\n" +
-                    "\"so sister.how does it feel to...(slices a bit of her face and drops blood)\"\n" +
-                    "\"you are a mo-mo-monster.\"\n" +
-                    "\"ı know.who denies that.know,back to your back.\"";
+    private static String editorManuscript = "";
 
     public static void main(String[] args) {
         String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = "AQ.Ab8RN6IabMVCrjOiZDvl4xj7n-wexbnIS-yKA9ZJwaYoqLnbXA";
+            apiKey = "gemini anahtarı gir"; // Buraya kendi geçerli AIzaSy anahtarını koyabilirsin
         }
 
-        WorkspaceRouter router = new WorkspaceRouter(apiKey);
+        UnifiedPipelineRouter router = new UnifiedPipelineRouter(apiKey);
         Scanner scanner = new Scanner(System.in);
 
         System.out.println("==================================================");
-        System.out.println("   YAZAR ÇALIŞMA ALANI (JVM INTERACTIVE CONSOLE)  ");
+        System.out.println("         YAZAR HIZLI MÜDAHALE TERMİNALİ          ");
         System.out.println("==================================================");
-        System.out.println("Komutlar:");
-        System.out.println(" - ':exit' -> Çıkış");
-        System.out.println(" - ':show' -> Mevcut editör metnini göster");
-        System.out.println(" - ':clear' -> Editör metnini sıfırla");
-        System.out.println("--------------------------------------------------\n");
+        System.out.println("1. Üzerinde çalışılacak metni girin.");
+        System.out.println("   (Metni yapıştırıp boş bir satırda ENTER'a basın veya bir .txt yolu girin)");
+        System.out.print("Metin / Dosya Yolu: ");
+
+        StringBuilder initialText = new StringBuilder();
+        while (scanner.hasNextLine()) {
+            String line = scanner.nextLine();
+            if (line.trim().isEmpty() && initialText.length() > 0) {
+                break;
+            }
+            if (line.endsWith(".txt") && Files.exists(Path.of(line.trim()))) {
+                try {
+                    initialText.append(Files.readString(Path.of(line.trim())));
+                    System.out.println("[Dosya başarıyla yüklendi]");
+                    break;
+                } catch (IOException e) {
+                    System.err.println("Dosya okunamadı: " + e.getMessage());
+                }
+            }
+            initialText.append(line).append("\n");
+        }
+
+        editorManuscript = initialText.toString().trim();
+        if (editorManuscript.isEmpty()) {
+            System.out.println("[Boş metin ile başlatıldı]");
+        }
+
+        System.out.println("\n--------------------------------------------------");
+        System.out.println("Komutlar: ':exit' (Panoya kopyalar ve çıkar), ':show', ':copy'");
+        System.out.println("--------------------------------------------------");
 
         while (true) {
-            System.out.println("\n[AKTİF EDİTÖR METNİ SONU]:");
+            System.out.println("\n[MEVCUT SON SATIRLAR]:");
             printLastLines(editorManuscript, 3);
-            System.out.print("\nPROMPT GİRİN > ");
+            System.out.print("\nKOMUT / PROMPT GİRİN > ");
 
             String input = scanner.nextLine().trim();
 
             if (input.equalsIgnoreCase(":exit")) {
-                System.out.println("Çalışma alanı kapatıldı.");
+                copyToClipboard(editorManuscript);
+                System.out.println("[Nihai metin panoya kopyalandı. Program kapatılıyor.]");
                 break;
             } else if (input.equalsIgnoreCase(":show")) {
-                System.out.println("\n--- TÜM EDİTÖR İÇERİĞİ ---");
-                System.out.println(editorManuscript);
-                System.out.println("--------------------------");
+                System.out.println("\n--- TÜM EDİTÖR İÇERİĞİ ---\n" + editorManuscript + "\n--------------------------");
                 continue;
-            } else if (input.equalsIgnoreCase(":clear")) {
-                editorManuscript = "";
-                System.out.println("[Editör temizlendi]");
+            } else if (input.equalsIgnoreCase(":copy")) {
+                copyToClipboard(editorManuscript);
+                System.out.println("[Mevcut metin panoya kopyalandı]");
                 continue;
             }
 
-            if (input.isEmpty()) {
-                continue;
-            }
+            if (input.isEmpty()) continue;
 
-            System.out.println("\n[İstek Analiz Ediliyor ve API Çağrılıyor...]");
+            System.out.println("\n[İşleniyor...]");
             StringBuilder responseAccumulator = new StringBuilder();
             long startMs = System.currentTimeMillis();
             boolean[] firstToken = {false};
 
             try {
-                // Lambda öncesinde niyeti belirle (değişken kapsam hatasını önler)
-                UserIntentAnalyzer.AnalysisResult analysis = router.getIntentAnalyzer().analyze(
-                        input,
-                        null,
-                        editorManuscript,
-                        UserIntentAnalyzer.ContextScope.FOCUSED
-                );
+                int cursor = editorManuscript.length();
+                EditorState state = new EditorState(editorManuscript, cursor, -1, -1);
 
                 router.dispatch(
                         input,
-                        null,
-                        editorManuscript,
-                        UserIntentAnalyzer.ContextScope.FOCUSED,
-                        AnalysisTier.K2_BALANCED,
-                        token -> {
+                        state,
+                        AnalysisTier.SURGICAL,
+                        (String token) -> {
                             if (!firstToken[0]) {
-                                System.out.println("[İlk Token Gecikmesi: " + (System.currentTimeMillis() - startMs) + "ms]");
-                                System.out.println("--- ÇIKTI AKIŞI (" + analysis.getIntent() + ") ---");
+                                System.out.println("[İlk Token: " + (System.currentTimeMillis() - startMs) + "ms]");
+                                System.out.println("--- ÇIKTI ---");
                                 firstToken[0] = true;
                             }
                             System.out.print(token);
@@ -89,39 +105,38 @@ public class InteractiveApp {
                         }
                 );
 
-                System.out.println("\n--- Akış Sonu (Toplam: " + (System.currentTimeMillis() - startMs) + "ms) ---");
+                System.out.println("\n--- Tamamlandı (" + (System.currentTimeMillis() - startMs) + "ms) ---");
 
-                // Metin güncelleme mekanizması
                 String generated = responseAccumulator.toString().trim();
                 if (!generated.isEmpty()) {
-                    if (analysis.getIntent() == UserIntentAnalyzer.IntentType.CONTINUE) {
+                    if (!editorManuscript.isEmpty()) {
                         editorManuscript += "\n" + generated;
-                        System.out.println("[Metin editörün sonuna eklendi]");
-                    } else if (analysis.getIntent() == UserIntentAnalyzer.IntentType.REVISE ||
-                            analysis.getIntent() == UserIntentAnalyzer.IntentType.PROOFREAD) {
-                        String target = analysis.getTargetPassage();
-                        if (target != null && editorManuscript.contains(target)) {
-                            editorManuscript = editorManuscript.replace(target, generated);
-                            System.out.println("[Hedef blok yerinde güncellendi]");
-                        } else {
-                            System.out.println("[Hedef metin ayrıştırılamadı, çıktı konsolda gösterildi]");
-                        }
-                    } else if (analysis.getIntent() == UserIntentAnalyzer.IntentType.CONSULT) {
-                        System.out.println("[İstişare modu: Editör metnine dokunulmadı]");
+                    } else {
+                        editorManuscript = generated;
                     }
+                    System.out.println("[Metne eklendi]");
                 }
 
             } catch (Exception e) {
-                System.err.println("Çağrı sırasında hata: " + e.getMessage());
+                System.err.println("İşlem hatası: " + e.getMessage());
             }
         }
 
         scanner.close();
     }
 
+    private static void copyToClipboard(String text) {
+        try {
+            StringSelection selection = new StringSelection(text);
+            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
+        } catch (Exception ignored) {
+            // Headless ortamlarda sessizce geç
+        }
+    }
+
     private static void printLastLines(String text, int maxLines) {
         if (text == null || text.isBlank()) {
-            System.out.println("(Editör boş)");
+            System.out.println("  (Metin boş)");
             return;
         }
         String[] lines = text.split("\\r?\\n");

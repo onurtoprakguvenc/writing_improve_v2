@@ -25,7 +25,7 @@ public class ConsultationEngine {
     private final OkHttpClient httpClient;
     private final Gson gson;
 
-    private static final String DEFAULT_MODEL = "gemini-3.8-flash";
+    private static final String DEFAULT_MODEL = "gemini-3.6-flash";
     private static final String BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     public ConsultationEngine(String apiKey) {

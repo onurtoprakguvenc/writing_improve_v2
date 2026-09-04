@@ -28,37 +28,30 @@ public class WorkspaceRouter {
     /**
      * Gelen isteği yönlendirir ve SSE token akışını onToken tüketicisine iletir.
      *
-     * @param rawPrompt      Sağ panel komut satırına yazılan metin
-     * @param selectedText   Sol editörde seçili metin (yoksa null veya boş)
-     * @param fullEditorText Sol editörün tüm içeriği
-     * @param scope          Bağlam penceresi derinliği
-     * @param tier           Yerel gölge çekirdek analiz katmanı
-     * @param onToken        Akış halindeki token'ları yakalayan tüketici
+     * @param rawPrompt Kullanıcı aksiyon/revizyon komutu
+     * @param state     Editörün anlık fiziksel durumu (metin, imleç, seçim aralığı)
+     * @param tier      Yerel gölge çekirdek analiz katmanı
+     * @param onToken   Akış halindeki token'ları yakalayan tüketici
      * @return Yapılan analizin operasyonel sonucu
      * @throws IOException Ağ veya SSE akış hatalarında fırlatılır
      */
     public UserIntentAnalyzer.AnalysisResult dispatch(
             String rawPrompt,
-            String selectedText,
-            String fullEditorText,
-            UserIntentAnalyzer.ContextScope scope,
+            EditorState state,
             AnalysisTier tier,
             Consumer<String> onToken
     ) throws IOException {
 
-        UserIntentAnalyzer.AnalysisResult analysis = intentAnalyzer.analyze(
-                rawPrompt,
-                selectedText,
-                fullEditorText,
-                scope
-        );
+        UserIntentAnalyzer.AnalysisResult analysis = intentAnalyzer.analyze(state, rawPrompt);
+        String fullManuscript = state.getFullManuscript();
+        String prompt = analysis.getPrompt();
 
         switch (analysis.getIntent()) {
             case CONTINUE:
                 // İleriye dönük olay örgüsü yürütme
                 calibrationEngine.streamNextDraft(
-                        analysis.getEffectiveContext(),
-                        analysis.getCleanInstruction(),
+                        fullManuscript,
+                        prompt,
                         tier,
                         onToken
                 );
@@ -67,15 +60,15 @@ public class WorkspaceRouter {
             case REVISE:
             case PROOFREAD:
                 // Yerinde dönüştürme veya mekanik imla düzeltme
-                String targetPassage = analysis.getTargetPassage();
+                String targetPassage = analysis.getTargetText();
                 if (targetPassage == null || targetPassage.isBlank()) {
-                    targetPassage = analysis.getEffectiveContext();
+                    targetPassage = fullManuscript;
                 }
 
                 revisionEngine.streamRevision(
                         targetPassage,
-                        analysis.getCleanInstruction(),
-                        analysis.getEffectiveContext(),
+                        prompt,
+                        fullManuscript,
                         tier,
                         onToken
                 );
@@ -84,8 +77,8 @@ public class WorkspaceRouter {
             case CONSULT:
                 // Metne dokunmadan nesnel analiz, tutarlılık veya lore kontrolü
                 consultationEngine.streamConsultation(
-                        analysis.getCleanInstruction(),
-                        analysis.getEffectiveContext(),
+                        prompt,
+                        fullManuscript,
                         onToken
                 );
                 break;

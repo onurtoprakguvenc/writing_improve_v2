@@ -21,7 +21,7 @@ public class Main {
     public static void main(String[] args) {
         String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = "AQ.Ab8RN6IabMVCrjOiZDvl4xj7n-wexbnIS-yKA9ZJwaYoqLnbXA";
+            apiKey = "gemini anahtarı gir";
         }
 
         if (apiKey.equals("YOUR_API_KEY_HERE") || apiKey.isBlank()) {

@@ -1,139 +1,460 @@
 package org.example;
 
-import java.util.regex.Matcher;
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
-public class UserIntentAnalyzer {
+public final class UserIntentAnalyzer {
 
-    public enum IntentType {
-        CONTINUE,
-        REVISE,
-        PROOFREAD,
-        CONSULT
+    private static final char[] DIALOGUE_LEAD_CHARS = {
+            '"', '\'', '\u201C', '\u201D', '\u2018', '\u2019',
+            '\u00AB', '\u00BB', '\u2014', '\u2013', '-', '\u2012', '\u2015'
+    };
+
+    private static final Pattern TYPO_MARKER_PATTERN = Pattern.compile("^\\*\\p{L}+|\\p{L}+\\*$");
+    private static final Pattern DIFF_REPLACEMENT_PATTERN = Pattern.compile(".+\\s*(->|=>)\\s*.+");
+    private static final Pattern SED_SUBSTITUTION_PATTERN = Pattern.compile("^s/[^/]+/[^/]*/?[a-z]*$");
+
+    private static final String[] PROOFREAD_GRAMMATICAL_STEMS = {
+            "typo", "spell", "gramm", "punct", "ortho", "correct", "fix", "err",
+            "comma", "period", "semicolon", "colon", "apostrophe", "hyphen", "dash",
+            "yazım", "imla", "imlâ", "noktala", "virgül", "nokta", "kesme", "hata", "dilbilgi"
+    };
+
+    private static final Set<String> INTERROGATIVE_STRUCTURAL_LEADS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+            "what", "why", "how", "where", "when", "who", "whom", "whose", "which"
+    )));
+
+    private static final Set<String> AUXILIARY_INVERSION_VERBS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+            "is", "are", "am", "was", "were", "can", "could", "should", "would",
+            "will", "shall", "do", "does", "did", "have", "has", "had", "may", "might", "must"
+    )));
+
+    private static final Set<String> INVERSION_SUBJECTS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+            "i", "you", "he", "she", "it", "we", "they", "this", "that", "these", "those",
+            "the", "a", "an", "there", "our", "my", "your", "their", "his", "her"
+    )));
+
+    private static final Pattern TURKISH_INTERROGATIVE_CLITIC = Pattern.compile(
+            "\\b(m[ıiuü](sin|sın|sun|sün|siniz|sınız|sunuz|sünüz|yiz|yız|yuz|yüz|dir|dır|dur|dür|di|dı|du|dü|miş|mış|muş|müş)?)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS
+    );
+
+    public UserIntentAnalyzer() {
     }
 
-    public enum ContextScope {
-        FOCUSED(1500),
-        EXTENDED(4000),
-        FULL_MANUSCRIPT(Integer.MAX_VALUE);
-
-        private final int charBudget;
-        ContextScope(int charBudget) { this.charBudget = charBudget; }
-        public int getCharBudget() { return charBudget; }
+    public AnalysisResult analyze(EditorState editorState, String rawPrompt) {
+        return analyze(editorState, rawPrompt, null);
     }
 
-    public static class AnalysisResult {
-        private final IntentType intent;
-        private final String cleanInstruction;
-        private final String targetPassage;
-        private final String effectiveContext;
-        private final boolean isComplexSequence;
-        private final boolean isFreshScene;
+    public AnalysisResult analyze(EditorState editorState, String rawPrompt, UserIntent explicitIntent) {
+        EditorState state = (editorState != null) ? editorState : EditorState.empty();
+        String prompt = (rawPrompt != null) ? rawPrompt.trim() : "";
 
-        public AnalysisResult(IntentType intent, String cleanInstruction, String targetPassage,
-                              String effectiveContext, boolean isComplexSequence, boolean isFreshScene) {
-            this.intent = intent;
-            this.cleanInstruction = cleanInstruction;
-            this.targetPassage = targetPassage;
-            this.effectiveContext = effectiveContext;
-            this.isComplexSequence = isComplexSequence;
-            this.isFreshScene = isFreshScene;
+        if (explicitIntent != null) {
+            return resolveExplicitIntent(state, prompt, explicitIntent);
         }
 
-        public IntentType getIntent() { return intent; }
-        public String getCleanInstruction() { return cleanInstruction; }
-        public String getTargetPassage() { return targetPassage; }
-        public String getEffectiveContext() { return effectiveContext; }
-        public boolean isComplexSequence() { return isComplexSequence; }
-        public boolean isFreshScene() { return isFreshScene; }
-    }
-
-    private static final Pattern CONSULT_PATTERN = Pattern.compile(
-            "\\b(sence|nasıl|neden|mantıklı mı|çelişki|tutarlı mı|hata var mı|tempo|ritim|fikir|who|what|why|how|should|does it make sense)\\b|\\?",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
-    );
-
-    private static final Pattern PROOFREAD_PATTERN = Pattern.compile(
-            "\\b(düzelt|yazım|imla|harf|typo|noktalama|grammar|proofread)\\b",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
-    );
-
-    private static final Pattern REVISE_PATTERN = Pattern.compile(
-            "\\b(değiştir|yeniden yaz|daha sert yap|yumuşat|şöyle de|yerine|kaldır|rewrite|revise|change|replace)\\b",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
-    );
-
-    // Sahne sınırı kontrolü (***, ---, [yeni sahne] vb.)
-    private static final Pattern SCENE_BREAK_PATTERN = Pattern.compile(
-            "(\\*{3,}|-{3,}|#{2,}|(?i)\\[(yeni sahne|scene break|chapter)\\])"
-    );
-
-    // Çoklu olay/sekans sayacı (virgül, 'sonra', 'and then', 'ardından')
-    private static final Pattern MULTI_STEP_PATTERN = Pattern.compile(
-            "(,|\\bve\\b|\\bsonra\\b|\\bardından\\b|\\band then\\b|\\bthen\\b)",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
-    );
-
-    public AnalysisResult analyze(String rawPrompt, String selectedText, String fullManuscript, ContextScope scope) {
-        String trimmedPrompt = rawPrompt == null ? "" : rawPrompt.trim();
-        boolean hasSelection = selectedText != null && !selectedText.isBlank();
-        String context = resolveContext(fullManuscript, scope);
-
-        // 1. Sahne Geçiş Kontrolü
-        boolean isFreshScene = false;
-        if (context != null && SCENE_BREAK_PATTERN.matcher(context).find()) {
-            String[] segments = SCENE_BREAK_PATTERN.split(context);
-            if (segments.length > 1) {
-                context = segments[segments.length - 1].trim();
-                isFreshScene = true;
+        if (state.hasSelection()) {
+            if (isProofreadStructuralCue(prompt)) {
+                return new AnalysisResult(
+                        UserIntent.PROOFREAD,
+                        prompt,
+                        state.getSelectedText(),
+                        state.getSelectionStart(),
+                        state.getSelectionEnd(),
+                        true,
+                        state,
+                        "Active selection; structural correction cues detected."
+                );
+            } else {
+                return new AnalysisResult(
+                        UserIntent.REVISE,
+                        prompt,
+                        state.getSelectedText(),
+                        state.getSelectionStart(),
+                        state.getSelectionEnd(),
+                        true,
+                        state,
+                        "Active selection; locked to in-place revision."
+                );
             }
         }
 
-        // 2. Çoklu Eylem Sekansı Kontrolü
-        Matcher stepMatcher = MULTI_STEP_PATTERN.matcher(trimmedPrompt);
-        int steps = 0;
-        while (stepMatcher.find()) steps++;
-        boolean isComplexSequence = steps >= 2;
-
-        // 3. İstişare Taraması
-        if (CONSULT_PATTERN.matcher(trimmedPrompt).find() && !hasSelection) {
-            return new AnalysisResult(IntentType.CONSULT, trimmedPrompt, null, context, isComplexSequence, isFreshScene);
+        if (isStructuralTransformationSyntax(prompt)) {
+            TextBlock safeTarget = extractSafeTarget(state.getFullManuscript(), state.getCursorPosition());
+            return new AnalysisResult(
+                    UserIntent.REVISE,
+                    prompt,
+                    safeTarget.text,
+                    safeTarget.start,
+                    safeTarget.end,
+                    true,
+                    state,
+                    "Structural transformation syntax; dynamically targeting trailing block."
+            );
         }
 
-        // 4. İmla Taraması
-        if (PROOFREAD_PATTERN.matcher(trimmedPrompt).find()) {
-            String target = hasSelection ? selectedText : extractSafeFallbackTarget(context);
-            return new AnalysisResult(IntentType.PROOFREAD, trimmedPrompt, target, context, isComplexSequence, isFreshScene);
+        if (isInterrogativeStructure(prompt)) {
+            return new AnalysisResult(
+                    UserIntent.CONSULT,
+                    prompt,
+                    "",
+                    -1,
+                    -1,
+                    false,
+                    state,
+                    "Interrogative structure without selection; advisory consultation mode."
+            );
         }
 
-        // 5. Revizyon Taraması
-        if (hasSelection || REVISE_PATTERN.matcher(trimmedPrompt).find()) {
-            String target = hasSelection ? selectedText : extractSafeFallbackTarget(context);
-            return new AnalysisResult(IntentType.REVISE, trimmedPrompt, target, context, isComplexSequence, isFreshScene);
-        }
-
-        // 6. Varsayılan Akış: Olay Örgüsü Devamı
-        return new AnalysisResult(IntentType.CONTINUE, trimmedPrompt, null, context, isComplexSequence, isFreshScene);
+        int insertionPoint = state.getCursorPosition();
+        return new AnalysisResult(
+                UserIntent.CONTINUE,
+                prompt,
+                "",
+                insertionPoint,
+                insertionPoint,
+                true,
+                state,
+                "No selection or question marker; default beat advancement."
+        );
     }
 
-    private String resolveContext(String fullText, ContextScope scope) {
-        if (fullText == null || fullText.isBlank()) return "";
-        if (scope == ContextScope.FULL_MANUSCRIPT) return fullText;
-        int budget = scope.getCharBudget();
-        if (fullText.length() <= budget) return fullText;
-        return fullText.substring(fullText.length() - budget);
+    private AnalysisResult resolveExplicitIntent(EditorState state, String prompt, UserIntent explicitIntent) {
+        switch (explicitIntent) {
+            case PROOFREAD:
+                if (state.hasSelection()) {
+                    return new AnalysisResult(
+                            UserIntent.PROOFREAD,
+                            prompt,
+                            state.getSelectedText(),
+                            state.getSelectionStart(),
+                            state.getSelectionEnd(),
+                            true,
+                            state,
+                            "Explicit PROOFREAD with selection."
+                    );
+                } else {
+                    TextBlock safeTarget = extractSafeTarget(state.getFullManuscript(), state.getCursorPosition());
+                    return new AnalysisResult(
+                            UserIntent.PROOFREAD,
+                            prompt,
+                            safeTarget.text,
+                            safeTarget.start,
+                            safeTarget.end,
+                            true,
+                            state,
+                            "Explicit PROOFREAD targeted trailing block."
+                    );
+                }
+
+            case REVISE:
+                if (state.hasSelection()) {
+                    return new AnalysisResult(
+                            UserIntent.REVISE,
+                            prompt,
+                            state.getSelectedText(),
+                            state.getSelectionStart(),
+                            state.getSelectionEnd(),
+                            true,
+                            state,
+                            "Explicit REVISE with selection."
+                    );
+                } else {
+                    TextBlock safeTarget = extractSafeTarget(state.getFullManuscript(), state.getCursorPosition());
+                    return new AnalysisResult(
+                            UserIntent.REVISE,
+                            prompt,
+                            safeTarget.text,
+                            safeTarget.start,
+                            safeTarget.end,
+                            true,
+                            state,
+                            "Explicit REVISE targeted trailing block."
+                    );
+                }
+
+            case CONSULT:
+                return new AnalysisResult(
+                        UserIntent.CONSULT,
+                        prompt,
+                        "",
+                        -1,
+                        -1,
+                        false,
+                        state,
+                        "Explicit CONSULT requested."
+                );
+
+            case CONTINUE:
+            default:
+                int insertionPoint = state.getCursorPosition();
+                return new AnalysisResult(
+                        UserIntent.CONTINUE,
+                        prompt,
+                        "",
+                        insertionPoint,
+                        insertionPoint,
+                        true,
+                        state,
+                        "Explicit CONTINUE at cursor."
+                );
+        }
     }
 
-    // Seçimsiz revizyonda tüm bloğu ezmek yerine sadece son diyalog veya cümleyi hedef alma
-    private String extractSafeFallbackTarget(String text) {
-        if (text == null || text.isBlank()) return "";
-        String[] lines = text.trim().split("\\r?\\n");
-        for (int i = lines.length - 1; i >= 0; i--) {
-            String line = lines[i].trim();
-            if (!line.isEmpty()) {
-                return line;
+    public boolean isProofreadStructuralCue(String prompt) {
+        if (prompt == null || prompt.isEmpty()) return false;
+
+        if (TYPO_MARKER_PATTERN.matcher(prompt).find()) return true;
+        if (DIFF_REPLACEMENT_PATTERN.matcher(prompt).matches() || SED_SUBSTITUTION_PATTERN.matcher(prompt).matches()) return true;
+
+        String clean = prompt.toLowerCase().replaceAll("[^\\p{L}\\s]", " ");
+        String[] tokens = clean.split("\\s+");
+        for (String token : tokens) {
+            if (token.isEmpty()) continue;
+            for (String stem : PROOFREAD_GRAMMATICAL_STEMS) {
+                if (token.contains(stem)) return true;
             }
         }
-        return text;
+        return false;
+    }
+
+    public boolean isInterrogativeStructure(String prompt) {
+        if (prompt == null || prompt.isEmpty()) return false;
+
+        if (hasTerminalQuestionPunctuation(prompt)) return true;
+        if (prompt.startsWith("¿")) return true;
+        if (TURKISH_INTERROGATIVE_CLITIC.matcher(prompt).find()) return true;
+
+        String normalized = prompt.trim();
+        String[] words = normalized.split("\\s+");
+        if (words.length == 0) return false;
+
+        String firstWord = words[0].toLowerCase().replaceAll("[^\\p{L}]", "");
+        if (firstWord.isEmpty()) return false;
+
+        if (INTERROGATIVE_STRUCTURAL_LEADS.contains(firstWord)) return true;
+
+        if (words.length >= 2 && AUXILIARY_INVERSION_VERBS.contains(firstWord)) {
+            String secondWord = words[1].toLowerCase().replaceAll("[^\\p{L}]", "");
+            if (INVERSION_SUBJECTS.contains(secondWord)) return true;
+        }
+
+        return false;
+    }
+
+    private boolean hasTerminalQuestionPunctuation(String text) {
+        int i = text.length() - 1;
+        while (i >= 0) {
+            char c = text.charAt(i);
+            if (Character.isWhitespace(c) || c == '"' || c == '\'' || c == '»' || c == '”' || c == '’' || c == ')' || c == ']') {
+                i--;
+            } else {
+                break;
+            }
+        }
+        if (i < 0) return false;
+        char c = text.charAt(i);
+        return c == '?' || c == '\uFF1F' || c == '\u061F';
+    }
+
+    private boolean isStructuralTransformationSyntax(String prompt) {
+        if (prompt == null || prompt.isEmpty()) return false;
+        return DIFF_REPLACEMENT_PATTERN.matcher(prompt).matches() || SED_SUBSTITUTION_PATTERN.matcher(prompt).matches();
+    }
+
+    public TextBlock extractSafeTarget(String manuscript, int cursor) {
+        if (manuscript == null || manuscript.isEmpty()) {
+            return new TextBlock("", 0, 0);
+        }
+
+        int len = manuscript.length();
+        int anchor = (cursor <= 0 || cursor > len) ? len : cursor;
+
+        int end = anchor;
+        while (end > 0 && Character.isWhitespace(manuscript.charAt(end - 1))) {
+            end--;
+        }
+
+        if (end == 0) {
+            end = len;
+            while (end > 0 && Character.isWhitespace(manuscript.charAt(end - 1))) {
+                end--;
+            }
+            if (end == 0) return new TextBlock("", 0, 0);
+        }
+
+        if (anchor < len && !Character.isWhitespace(manuscript.charAt(anchor))) {
+            int forward = anchor;
+            while (forward < len && manuscript.charAt(forward) != '\n' && manuscript.charAt(forward) != '\r') {
+                forward++;
+            }
+            end = Math.max(end, forward);
+        }
+
+        int lineStart = end;
+        while (lineStart > 0 && manuscript.charAt(lineStart - 1) != '\n' && manuscript.charAt(lineStart - 1) != '\r') {
+            lineStart--;
+        }
+
+        boolean isDialogue = isDialogueLine(manuscript, lineStart, end);
+        int blockStart = lineStart;
+
+        if (!isDialogue) {
+            while (blockStart > 0) {
+                int prevLineEnd = blockStart - 1;
+                if (prevLineEnd > 0 && manuscript.charAt(prevLineEnd) == '\n' && manuscript.charAt(prevLineEnd - 1) == '\r') {
+                    prevLineEnd--;
+                }
+
+                if (prevLineEnd >= 0 && (manuscript.charAt(prevLineEnd) == '\n' || manuscript.charAt(prevLineEnd) == '\r')) {
+                    break;
+                }
+
+                int prevLineStart = prevLineEnd;
+                while (prevLineStart > 0 && manuscript.charAt(prevLineStart - 1) != '\n' && manuscript.charAt(prevLineStart - 1) != '\r') {
+                    prevLineStart--;
+                }
+
+                if (isLineBlank(manuscript, prevLineStart, prevLineEnd + 1) || isDialogueLine(manuscript, prevLineStart, prevLineEnd + 1)) {
+                    break;
+                }
+
+                blockStart = prevLineStart;
+            }
+        }
+
+        while (blockStart < end && Character.isWhitespace(manuscript.charAt(blockStart))) {
+            blockStart++;
+        }
+        while (end > blockStart && Character.isWhitespace(manuscript.charAt(end - 1))) {
+            end--;
+        }
+
+        if (blockStart >= end) return new TextBlock("", blockStart, blockStart);
+
+        return new TextBlock(manuscript.substring(blockStart, end), blockStart, end);
+    }
+
+    private boolean isDialogueLine(String manuscript, int start, int end) {
+        int i = start;
+        while (i < end && (manuscript.charAt(i) == ' ' || manuscript.charAt(i) == '\t')) {
+            i++;
+        }
+        if (i >= end) return false;
+
+        char c = manuscript.charAt(i);
+        for (char lead : DIALOGUE_LEAD_CHARS) {
+            if (c == lead) return true;
+        }
+        return false;
+    }
+
+    private boolean isLineBlank(String manuscript, int start, int end) {
+        for (int i = start; i < end; i++) {
+            char c = manuscript.charAt(i);
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static final class TextBlock implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public final String text;
+        public final int start;
+        public final int end;
+
+        public TextBlock(String text, int start, int end) {
+            this.text = (text != null) ? text : "";
+            this.start = start;
+            this.end = end;
+        }
+
+        public int length() { return end - start; }
+        public boolean isEmpty() { return text.isEmpty(); }
+
+        @Override
+        public String toString() {
+            return "TextBlock{start=" + start + ", end=" + end + ", text='" + text + "'}";
+        }
+    }
+
+    public static final class AnalysisResult implements Serializable {
+        private static final long serialVersionUID = 1L;
+        private final UserIntent intent;
+        private final String prompt;
+        private final String targetText;
+        private final int targetStart;
+        private final int targetEnd;
+        private final boolean manuscriptModificationAllowed;
+        private final EditorState editorState;
+        private final String routingReason;
+
+        public AnalysisResult(
+                UserIntent intent,
+                String prompt,
+                String targetText,
+                int targetStart,
+                int targetEnd,
+                boolean manuscriptModificationAllowed,
+                EditorState editorState,
+                String routingReason
+        ) {
+            this.intent = Objects.requireNonNull(intent, "Intent cannot be null");
+            this.prompt = (prompt != null) ? prompt : "";
+            this.targetText = (targetText != null) ? targetText : "";
+            this.targetStart = targetStart;
+            this.targetEnd = targetEnd;
+            this.manuscriptModificationAllowed = manuscriptModificationAllowed;
+            this.editorState = editorState;
+            this.routingReason = (routingReason != null) ? routingReason : "";
+        }
+
+        public UserIntent getIntent() { return intent; }
+        public String getPrompt() { return prompt; }
+        public String getTargetText() { return targetText; }
+        public int getTargetStart() { return targetStart; }
+        public int getTargetEnd() { return targetEnd; }
+        public boolean isManuscriptModificationAllowed() { return manuscriptModificationAllowed; }
+        public boolean hasTargetRange() { return targetStart >= 0 && targetEnd >= targetStart; }
+        public EditorState getEditorState() { return editorState; }
+        public String getRoutingReason() { return routingReason; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            AnalysisResult that = (AnalysisResult) o;
+            return targetStart == that.targetStart &&
+                    targetEnd == that.targetEnd &&
+                    manuscriptModificationAllowed == that.manuscriptModificationAllowed &&
+                    intent == that.intent &&
+                    Objects.equals(prompt, that.prompt) &&
+                    Objects.equals(targetText, that.targetText) &&
+                    Objects.equals(routingReason, that.routingReason);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(intent, prompt, targetText, targetStart, targetEnd, manuscriptModificationAllowed, routingReason);
+        }
+
+        @Override
+        public String toString() {
+            return "AnalysisResult{" +
+                    "intent=" + intent +
+                    ", targetRange=[" + targetStart + ", " + targetEnd + "]" +
+                    ", targetLength=" + targetText.length() +
+                    ", modificationAllowed=" + manuscriptModificationAllowed +
+                    ", reason='" + routingReason + '\'' +
+                    '}';
+        }
     }
 }
