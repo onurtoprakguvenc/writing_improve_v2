@@ -18,26 +18,28 @@ public class InteractiveApp {
     public static void main(String[] args) {
         String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = "gemini anahtarı gir"; // Buraya kendi geçerli AIzaSy anahtarını koyabilirsin
+            apiKey = "AQ.Ab8RN6JI41Cl9YOo2WXXua2kFldq9bV4gdgNEKOMVSzMMH6_eQ"; // Geçerli AIzaSy anahtarını buraya koy
         }
 
-        UnifiedPipelineRouter router = new UnifiedPipelineRouter(apiKey);
+        // Router başlatma: Router String alacak şekilde güncellendiğinde doğrudan apiKey'i geçirir.
+        UnifiedPipelineRouter router = new UnifiedPipelineRouter(apiKey, false);
         Scanner scanner = new Scanner(System.in);
 
         System.out.println("==================================================");
         System.out.println("         YAZAR HIZLI MÜDAHALE TERMİNALİ          ");
         System.out.println("==================================================");
         System.out.println("1. Üzerinde çalışılacak metni girin.");
-        System.out.println("   (Metni yapıştırıp boş bir satırda ENTER'a basın veya bir .txt yolu girin)");
+        System.out.println("   (Metni yapıştırıp boş bir satırda ENTER'a basın veya doğrudan bir .txt yolu girin)");
         System.out.print("Metin / Dosya Yolu: ");
 
         StringBuilder initialText = new StringBuilder();
+        boolean firstLine = true;
+
         while (scanner.hasNextLine()) {
             String line = scanner.nextLine();
-            if (line.trim().isEmpty() && initialText.length() > 0) {
-                break;
-            }
-            if (line.endsWith(".txt") && Files.exists(Path.of(line.trim()))) {
+
+            // İlk satırda doğrudan geçerli bir .txt dosyası girildiyse dosyayı oku ve bitir
+            if (firstLine && line.trim().endsWith(".txt") && Files.exists(Path.of(line.trim()))) {
                 try {
                     initialText.append(Files.readString(Path.of(line.trim())));
                     System.out.println("[Dosya başarıyla yüklendi]");
@@ -46,6 +48,13 @@ public class InteractiveApp {
                     System.err.println("Dosya okunamadı: " + e.getMessage());
                 }
             }
+            firstLine = false;
+
+            // Boş bir satır girildiğinde yapıştırma işlemi tamamlanır
+            if (line.trim().isEmpty() && initialText.length() > 0) {
+                break;
+            }
+
             initialText.append(line).append("\n");
         }
 
@@ -92,7 +101,7 @@ public class InteractiveApp {
                 router.dispatch(
                         input,
                         state,
-                        AnalysisTier.SURGICAL,
+                        AnalysisTier.BALANCED,
                         (String token) -> {
                             if (!firstToken[0]) {
                                 System.out.println("[İlk Token: " + (System.currentTimeMillis() - startMs) + "ms]");
@@ -109,12 +118,15 @@ public class InteractiveApp {
 
                 String generated = responseAccumulator.toString().trim();
                 if (!generated.isEmpty()) {
+                    // Askıda kalan tırnak veya parantezleri güvenli şekilde kapat
+                    generated = StructuralPolish.closeHangingSyntax(generated);
+
                     if (!editorManuscript.isEmpty()) {
                         editorManuscript += "\n" + generated;
                     } else {
                         editorManuscript = generated;
                     }
-                    System.out.println("[Metne eklendi]");
+                    System.out.println("[Metne eklendi ve sentaks doğrulandı]");
                 }
 
             } catch (Exception e) {

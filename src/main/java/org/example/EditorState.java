@@ -153,6 +153,22 @@ public final class EditorState implements Serializable {
         return new EditorState(fullManuscript, Math.max(newStart, newEnd), newStart, newEnd);
     }
 
+    /**
+     * Extracts surrounding context symmetrically around the current anchor/selection.
+     * Captures up to radiusChars before the selection and up to radiusChars after the selection.
+     */
+    public String getSurroundingContext(int radiusChars) {
+        int clampedRadius = Math.max(0, radiusChars);
+        int startAnchor = hasSelection() ? selectionStart : cursorPosition;
+        int endAnchor = hasSelection() ? selectionEnd : cursorPosition;
+
+        int start = Math.max(0, startAnchor - clampedRadius);
+        int end = Math.min(fullManuscript.length(), endAnchor + clampedRadius);
+
+        return fullManuscript.substring(start, end);
+    }
+
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

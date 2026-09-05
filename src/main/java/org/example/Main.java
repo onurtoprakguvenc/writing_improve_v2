@@ -32,7 +32,7 @@ public class Main {
         // CLI parametresi varsa onu al, yoksa test örneklerini kullan
         String context = (args.length > 0 && !args[0].isBlank()) ? args[0] : DEFAULT_CONTEXT;
         String plotPoint = (args.length > 1 && !args[1].isBlank()) ? args[1] : DEFAULT_PLOT_POINT;
-        AnalysisTier tier = (args.length > 2) ? parseTier(args[2]) : AnalysisTier.K2_BALANCED;
+        AnalysisTier tier = (args.length > 2) ? parseTier(args[2]) : AnalysisTier.BALANCED;
 
         CalibrationEngine engine = new CalibrationEngine(apiKey);
 
@@ -99,11 +99,11 @@ public class Main {
     }
 
     private static AnalysisTier parseTier(String raw) {
-        if (raw == null) return AnalysisTier.K2_BALANCED;
+        if (raw == null) return AnalysisTier.BALANCED;
         switch (raw.toUpperCase(Locale.ROOT)) {
-            case "K1": return AnalysisTier.K1_LIGHT;
-            case "K3": return AnalysisTier.K3_DEEP;
-            default: return AnalysisTier.K2_BALANCED;
+                case "K1": return AnalysisTier.FAST;
+            case "K3": return AnalysisTier.DEEP;
+            default: return AnalysisTier.BALANCED;
         }
     }
 }

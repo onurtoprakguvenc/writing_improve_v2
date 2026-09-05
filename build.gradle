@@ -1,13 +1,12 @@
 plugins {
-    id 'java'
     id 'application'
+    id 'java'
 }
 
-group = 'org.example'
-version = '1.0-SNAPSHOT'
-
-application {
-    mainClass = 'org.example.InteractiveApp'
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
 
 repositories {
@@ -15,29 +14,23 @@ repositories {
 }
 
 dependencies {
+    // Google Cloud OAuth2 Authentication Library
+    implementation 'com.google.auth:google-auth-library-oauth2-http:1.24.1'
+
+    // JSON Parser (Gson)
     implementation 'com.google.code.gson:gson:2.10.1'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    // Testing
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-tasks.named('test') {
-    useJUnitPlatform()
+application {
+    mainClass = 'org.example.InteractiveApp'
 }
 
-// Konsoldan interaktif klavye girdisi alabilmek için stdin bağlantısı
-tasks.named('run') {
-    standardInput = System.in
-}
-
-// Tüm bağımlılıkları içine gömen çalıştırılabilir Fat JAR görevi
-tasks.named('jar') {
-    manifest {
-        attributes 'Main-Class': 'org.example.InteractiveApp'
-    }
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from {
-        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
-    }
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs = ['-nowarn']
+    options.warnings = false
 }

@@ -1,12 +1,12 @@
 package org.example;
 
+/**
+ * Katman 2/3: Hesaplama ve Model Seviyesi Konfigürasyonu.
+ */
 public enum AnalysisTier {
-    K1_LIGHT("gemini-3.6-flash", "Lightweight tier"),
-    K2_BALANCED("gemini-3.6-flash", "Standard balanced tier"),
-    K3_DEEP("gemini-3.1-pro", "Deep reasoning tier"),
-    SURGICAL("gemini-3.6-flash", "Surgical execution"),
-    DEEP("gemini-3.1-pro", "High-depth reasoning"),
-    FAST("gemini-3.6-flash", "Rapid streaming");
+    FAST("gemini-3.6-flash", "Hızlı ve düşük gecikmeli akış"),
+    BALANCED("gemini-3.6-flash", "Dengeli cerrahi analiz ve üretim"),
+    DEEP("gemini-3.1-pro", "Yüksek derinlikli akıl yürütme");
 
     private final String modelName;
     private final String description;

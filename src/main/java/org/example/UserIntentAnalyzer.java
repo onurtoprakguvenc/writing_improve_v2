@@ -1,48 +1,20 @@
 package org.example;
 
 import java.io.Serializable;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.Objects;
-import java.util.Set;
 import java.util.regex.Pattern;
 
+/**
+ * Katman 2: Evrensel Yapısal Niyet ve Hedef Ayrıştırıcı.
+ *
+ * Sözlüksel etiketlemelerden, statik kelime listelerinden ve türe bağımlı
+ * kısıtlardan tamamen arındırılmıştır. Sadece fiziksel tampon geometrisi,
+ * seçim sınırları ve yapısal operatörlerle hedef belirler.
+ */
 public final class UserIntentAnalyzer {
 
-    private static final char[] DIALOGUE_LEAD_CHARS = {
-            '"', '\'', '\u201C', '\u201D', '\u2018', '\u2019',
-            '\u00AB', '\u00BB', '\u2014', '\u2013', '-', '\u2012', '\u2015'
-    };
-
-    private static final Pattern TYPO_MARKER_PATTERN = Pattern.compile("^\\*\\p{L}+|\\p{L}+\\*$");
-    private static final Pattern DIFF_REPLACEMENT_PATTERN = Pattern.compile(".+\\s*(->|=>)\\s*.+");
-    private static final Pattern SED_SUBSTITUTION_PATTERN = Pattern.compile("^s/[^/]+/[^/]*/?[a-z]*$");
-
-    private static final String[] PROOFREAD_GRAMMATICAL_STEMS = {
-            "typo", "spell", "gramm", "punct", "ortho", "correct", "fix", "err",
-            "comma", "period", "semicolon", "colon", "apostrophe", "hyphen", "dash",
-            "yazım", "imla", "imlâ", "noktala", "virgül", "nokta", "kesme", "hata", "dilbilgi"
-    };
-
-    private static final Set<String> INTERROGATIVE_STRUCTURAL_LEADS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            "what", "why", "how", "where", "when", "who", "whom", "whose", "which"
-    )));
-
-    private static final Set<String> AUXILIARY_INVERSION_VERBS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            "is", "are", "am", "was", "were", "can", "could", "should", "would",
-            "will", "shall", "do", "does", "did", "have", "has", "had", "may", "might", "must"
-    )));
-
-    private static final Set<String> INVERSION_SUBJECTS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            "i", "you", "he", "she", "it", "we", "they", "this", "that", "these", "those",
-            "the", "a", "an", "there", "our", "my", "your", "their", "his", "her"
-    )));
-
-    private static final Pattern TURKISH_INTERROGATIVE_CLITIC = Pattern.compile(
-            "\\b(m[ıiuü](sin|sın|sun|sün|siniz|sınız|sunuz|sünüz|yiz|yız|yuz|yüz|dir|dır|dur|dür|di|dı|du|dü|miş|mış|muş|müş)?)\\b",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS
-    );
+    private static final Pattern DIFF_OPERATOR_PATTERN = Pattern.compile(".+\\s*(->|=>)\\s*.+");
+    private static final Pattern SED_OPERATOR_PATTERN = Pattern.compile("^s/[^/]+/[^/]*/?[a-z]*$");
 
     public UserIntentAnalyzer() {
     }
@@ -59,47 +31,37 @@ public final class UserIntentAnalyzer {
             return resolveExplicitIntent(state, prompt, explicitIntent);
         }
 
+        // 1. Durum: Kullanıcı metin seçmişse (E-posta cümlesi, roman repliği veya kod satırı)
         if (state.hasSelection()) {
-            if (isProofreadStructuralCue(prompt)) {
-                return new AnalysisResult(
-                        UserIntent.PROOFREAD,
-                        prompt,
-                        state.getSelectedText(),
-                        state.getSelectionStart(),
-                        state.getSelectionEnd(),
-                        true,
-                        state,
-                        "Active selection; structural correction cues detected."
-                );
-            } else {
-                return new AnalysisResult(
-                        UserIntent.REVISE,
-                        prompt,
-                        state.getSelectedText(),
-                        state.getSelectionStart(),
-                        state.getSelectionEnd(),
-                        true,
-                        state,
-                        "Active selection; locked to in-place revision."
-                );
-            }
-        }
-
-        if (isStructuralTransformationSyntax(prompt)) {
-            TextBlock safeTarget = extractSafeTarget(state.getFullManuscript(), state.getCursorPosition());
             return new AnalysisResult(
                     UserIntent.REVISE,
                     prompt,
-                    safeTarget.text,
-                    safeTarget.start,
-                    safeTarget.end,
+                    state.getSelectedText(),
+                    state.getSelectionStart(),
+                    state.getSelectionEnd(),
                     true,
                     state,
-                    "Structural transformation syntax; dynamically targeting trailing block."
+                    "Bounded buffer selection active; routing to in-place mutation."
             );
         }
 
-        if (isInterrogativeStructure(prompt)) {
+        // 2. Durum: Açık yapısal dönüşüm sözdizimi (örn: a -> b veya s/eski/yeni/)
+        if (isStructuralTransformation(prompt)) {
+            TextBlock target = extractPrecedingBlock(state.getFullManuscript(), state.getCursorPosition());
+            return new AnalysisResult(
+                    UserIntent.REVISE,
+                    prompt,
+                    target.text,
+                    target.start,
+                    target.end,
+                    true,
+                    state,
+                    "Explicit transformation operator detected; targeted immediate preceding block."
+            );
+        }
+
+        // 3. Durum: Sorgulama / İstişare (Metin üzerinde değişiklik yapmadan akıl yürütme)
+        if (isInterrogative(prompt)) {
             return new AnalysisResult(
                     UserIntent.CONSULT,
                     prompt,
@@ -108,74 +70,50 @@ public final class UserIntentAnalyzer {
                     -1,
                     false,
                     state,
-                    "Interrogative structure without selection; advisory consultation mode."
+                    "Interrogative syntax without selection; routing to consultation."
             );
         }
 
-        int insertionPoint = state.getCursorPosition();
+        // 4. Durum: Varsayılan ileri yönlü akış (İmleç noktasından itibaren devam ettirme)
+        int cursor = state.getCursorPosition();
         return new AnalysisResult(
                 UserIntent.CONTINUE,
                 prompt,
                 "",
-                insertionPoint,
-                insertionPoint,
+                cursor,
+                cursor,
                 true,
                 state,
-                "No selection or question marker; default beat advancement."
+                "Linear cursor continuation; advancing buffer."
         );
     }
 
     private AnalysisResult resolveExplicitIntent(EditorState state, String prompt, UserIntent explicitIntent) {
         switch (explicitIntent) {
             case PROOFREAD:
-                if (state.hasSelection()) {
-                    return new AnalysisResult(
-                            UserIntent.PROOFREAD,
-                            prompt,
-                            state.getSelectedText(),
-                            state.getSelectionStart(),
-                            state.getSelectionEnd(),
-                            true,
-                            state,
-                            "Explicit PROOFREAD with selection."
-                    );
-                } else {
-                    TextBlock safeTarget = extractSafeTarget(state.getFullManuscript(), state.getCursorPosition());
-                    return new AnalysisResult(
-                            UserIntent.PROOFREAD,
-                            prompt,
-                            safeTarget.text,
-                            safeTarget.start,
-                            safeTarget.end,
-                            true,
-                            state,
-                            "Explicit PROOFREAD targeted trailing block."
-                    );
-                }
-
             case REVISE:
                 if (state.hasSelection()) {
                     return new AnalysisResult(
-                            UserIntent.REVISE,
+                            explicitIntent,
                             prompt,
                             state.getSelectedText(),
                             state.getSelectionStart(),
                             state.getSelectionEnd(),
                             true,
                             state,
-                            "Explicit REVISE with selection."
+                            "Explicit " + explicitIntent + " with selection."
                     );
                 } else {
-                    TextBlock safeTarget = extractSafeTarget(state.getFullManuscript(), state.getCursorPosition());
+                    TextBlock target = extractPrecedingBlock(state.getFullManuscript(), state.getCursorPosition());
                     return new AnalysisResult(
-                            UserIntent.REVISE,
+                            explicitIntent,
                             prompt,
-                            safeTarget.text,
-                            safeTarget.start,
-                            safeTarget.end,
+                            target.text,
+                            target.start,
+                            target.end,
                             true,
                             state,
-                            "Explicit REVISE targeted trailing block."
+                            "Explicit " + explicitIntent + " targeted preceding block."
                     );
                 }
 
@@ -193,13 +131,13 @@ public final class UserIntentAnalyzer {
 
             case CONTINUE:
             default:
-                int insertionPoint = state.getCursorPosition();
+                int cursor = state.getCursorPosition();
                 return new AnalysisResult(
                         UserIntent.CONTINUE,
                         prompt,
                         "",
-                        insertionPoint,
-                        insertionPoint,
+                        cursor,
+                        cursor,
                         true,
                         state,
                         "Explicit CONTINUE at cursor."
@@ -207,51 +145,16 @@ public final class UserIntentAnalyzer {
         }
     }
 
-    public boolean isProofreadStructuralCue(String prompt) {
+    private boolean isStructuralTransformation(String prompt) {
         if (prompt == null || prompt.isEmpty()) return false;
-
-        if (TYPO_MARKER_PATTERN.matcher(prompt).find()) return true;
-        if (DIFF_REPLACEMENT_PATTERN.matcher(prompt).matches() || SED_SUBSTITUTION_PATTERN.matcher(prompt).matches()) return true;
-
-        String clean = prompt.toLowerCase().replaceAll("[^\\p{L}\\s]", " ");
-        String[] tokens = clean.split("\\s+");
-        for (String token : tokens) {
-            if (token.isEmpty()) continue;
-            for (String stem : PROOFREAD_GRAMMATICAL_STEMS) {
-                if (token.contains(stem)) return true;
-            }
-        }
-        return false;
+        return DIFF_OPERATOR_PATTERN.matcher(prompt).matches() || SED_OPERATOR_PATTERN.matcher(prompt).matches();
     }
 
-    public boolean isInterrogativeStructure(String prompt) {
+    private boolean isInterrogative(String prompt) {
         if (prompt == null || prompt.isEmpty()) return false;
-
-        if (hasTerminalQuestionPunctuation(prompt)) return true;
-        if (prompt.startsWith("¿")) return true;
-        if (TURKISH_INTERROGATIVE_CLITIC.matcher(prompt).find()) return true;
-
-        String normalized = prompt.trim();
-        String[] words = normalized.split("\\s+");
-        if (words.length == 0) return false;
-
-        String firstWord = words[0].toLowerCase().replaceAll("[^\\p{L}]", "");
-        if (firstWord.isEmpty()) return false;
-
-        if (INTERROGATIVE_STRUCTURAL_LEADS.contains(firstWord)) return true;
-
-        if (words.length >= 2 && AUXILIARY_INVERSION_VERBS.contains(firstWord)) {
-            String secondWord = words[1].toLowerCase().replaceAll("[^\\p{L}]", "");
-            if (INVERSION_SUBJECTS.contains(secondWord)) return true;
-        }
-
-        return false;
-    }
-
-    private boolean hasTerminalQuestionPunctuation(String text) {
-        int i = text.length() - 1;
+        int i = prompt.length() - 1;
         while (i >= 0) {
-            char c = text.charAt(i);
+            char c = prompt.charAt(i);
             if (Character.isWhitespace(c) || c == '"' || c == '\'' || c == '»' || c == '”' || c == '’' || c == ')' || c == ']') {
                 i--;
             } else {
@@ -259,16 +162,15 @@ public final class UserIntentAnalyzer {
             }
         }
         if (i < 0) return false;
-        char c = text.charAt(i);
-        return c == '?' || c == '\uFF1F' || c == '\u061F';
+        char c = prompt.charAt(i);
+        return c == '?' || c == '\uFF1F' || c == '\u061F' || prompt.startsWith("¿");
     }
 
-    private boolean isStructuralTransformationSyntax(String prompt) {
-        if (prompt == null || prompt.isEmpty()) return false;
-        return DIFF_REPLACEMENT_PATTERN.matcher(prompt).matches() || SED_SUBSTITUTION_PATTERN.matcher(prompt).matches();
-    }
-
-    public TextBlock extractSafeTarget(String manuscript, int cursor) {
+    /**
+     * İmlecin hemen gerisindeki bağımsız yapısal kütleyi (paragraf, satır veya kod bloğu)
+     * türünden bağımsız olarak sınırlarından yakalar.
+     */
+    public TextBlock extractPrecedingBlock(String manuscript, int cursor) {
         if (manuscript == null || manuscript.isEmpty()) {
             return new TextBlock("", 0, 0);
         }
@@ -276,93 +178,40 @@ public final class UserIntentAnalyzer {
         int len = manuscript.length();
         int anchor = (cursor <= 0 || cursor > len) ? len : cursor;
 
+        // İmleç gerisindeki boşlukları temizle
         int end = anchor;
         while (end > 0 && Character.isWhitespace(manuscript.charAt(end - 1))) {
             end--;
         }
 
-        if (end == 0) {
-            end = len;
-            while (end > 0 && Character.isWhitespace(manuscript.charAt(end - 1))) {
-                end--;
+        if (end == 0) return new TextBlock("", 0, 0);
+
+        // Çift satır sonu (\n\n) veya tek satırlık kütle sınırını geriye doğru ara
+        int start = end;
+        while (start > 0) {
+            char c = manuscript.charAt(start - 1);
+            if (c == '\n') {
+                if (start >= 2 && manuscript.charAt(start - 2) == '\n') {
+                    break; // İki ardışık satır sonu: paragraf sınırı
+                }
+                if (start >= 3 && manuscript.charAt(start - 2) == '\r' && manuscript.charAt(start - 3) == '\n') {
+                    break; // Windows formatı: \r\n\r\n sınırı
+                }
             }
-            if (end == 0) return new TextBlock("", 0, 0);
+            start--;
         }
 
-        if (anchor < len && !Character.isWhitespace(manuscript.charAt(anchor))) {
-            int forward = anchor;
-            while (forward < len && manuscript.charAt(forward) != '\n' && manuscript.charAt(forward) != '\r') {
-                forward++;
-            }
-            end = Math.max(end, forward);
+        // Başlangıç ve bitişteki boşlukları ayıkla
+        while (start < end && Character.isWhitespace(manuscript.charAt(start))) {
+            start++;
         }
-
-        int lineStart = end;
-        while (lineStart > 0 && manuscript.charAt(lineStart - 1) != '\n' && manuscript.charAt(lineStart - 1) != '\r') {
-            lineStart--;
-        }
-
-        boolean isDialogue = isDialogueLine(manuscript, lineStart, end);
-        int blockStart = lineStart;
-
-        if (!isDialogue) {
-            while (blockStart > 0) {
-                int prevLineEnd = blockStart - 1;
-                if (prevLineEnd > 0 && manuscript.charAt(prevLineEnd) == '\n' && manuscript.charAt(prevLineEnd - 1) == '\r') {
-                    prevLineEnd--;
-                }
-
-                if (prevLineEnd >= 0 && (manuscript.charAt(prevLineEnd) == '\n' || manuscript.charAt(prevLineEnd) == '\r')) {
-                    break;
-                }
-
-                int prevLineStart = prevLineEnd;
-                while (prevLineStart > 0 && manuscript.charAt(prevLineStart - 1) != '\n' && manuscript.charAt(prevLineStart - 1) != '\r') {
-                    prevLineStart--;
-                }
-
-                if (isLineBlank(manuscript, prevLineStart, prevLineEnd + 1) || isDialogueLine(manuscript, prevLineStart, prevLineEnd + 1)) {
-                    break;
-                }
-
-                blockStart = prevLineStart;
-            }
-        }
-
-        while (blockStart < end && Character.isWhitespace(manuscript.charAt(blockStart))) {
-            blockStart++;
-        }
-        while (end > blockStart && Character.isWhitespace(manuscript.charAt(end - 1))) {
+        while (end > start && Character.isWhitespace(manuscript.charAt(end - 1))) {
             end--;
         }
 
-        if (blockStart >= end) return new TextBlock("", blockStart, blockStart);
+        if (start >= end) return new TextBlock("", start, start);
 
-        return new TextBlock(manuscript.substring(blockStart, end), blockStart, end);
-    }
-
-    private boolean isDialogueLine(String manuscript, int start, int end) {
-        int i = start;
-        while (i < end && (manuscript.charAt(i) == ' ' || manuscript.charAt(i) == '\t')) {
-            i++;
-        }
-        if (i >= end) return false;
-
-        char c = manuscript.charAt(i);
-        for (char lead : DIALOGUE_LEAD_CHARS) {
-            if (c == lead) return true;
-        }
-        return false;
-    }
-
-    private boolean isLineBlank(String manuscript, int start, int end) {
-        for (int i = start; i < end; i++) {
-            char c = manuscript.charAt(i);
-            if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
-                return false;
-            }
-        }
-        return true;
+        return new TextBlock(manuscript.substring(start, end), start, end);
     }
 
     public static final class TextBlock implements Serializable {

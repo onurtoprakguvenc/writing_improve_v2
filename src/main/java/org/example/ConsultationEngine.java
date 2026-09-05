@@ -1,148 +1,93 @@
 package org.example;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import okhttp3.*;
+import org.example.transport.GeminiClientConfig;
+import org.example.transport.GeminiPayloadBuilder;
+import org.example.transport.GeminiSseTransport;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * Katman 3 Analitik İstişare Motoru.
- * Hikaye metnine dokunmaz, üslup sentaksını taklit etmez.
- * Doğrudan tutarlılık, mantık, lore veya tempo analizi yapar.
+ * Katman 3: Tahribatsız Dinamik Analitik Danışma ve İnceleme Motoru.
+ *
+ * Katman 2 (AnalysisTier) seviyesine ve sorgu hacmine göre modelini,
+ * sıcaklığını ve token bütçesini dinamik olarak ölçekler.
  */
 public class ConsultationEngine {
 
     private final String apiKey;
-    private final String modelName;
-    private final OkHttpClient httpClient;
-    private final Gson gson;
-
-    private static final String DEFAULT_MODEL = "gemini-3.6-flash";
-    private static final String BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     public ConsultationEngine(String apiKey) {
-        this(apiKey, DEFAULT_MODEL);
+        this.apiKey = apiKey;
     }
 
-    public ConsultationEngine(String apiKey, String modelName) {
-        this.apiKey = Objects.requireNonNull(apiKey, "apiKey null olamaz");
-        this.modelName = (modelName == null || modelName.isBlank()) ? DEFAULT_MODEL : modelName;
-        this.gson = new Gson();
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(15))
-                .readTimeout(Duration.ofSeconds(60))
-                .writeTimeout(Duration.ofSeconds(15))
-                .build();
-    }
+    public void streamConsultation(
+            String query,
+            String referenceContext,
+            AnalysisTier tier,
+            Consumer<String> onToken
+    ) throws IOException {
+        Objects.requireNonNull(onToken, "onToken must not be null");
 
-    public void streamConsultation(String query, String storyContext, Consumer<String> onToken) throws IOException {
-        String endpoint = BASE_URL + modelName + ":streamGenerateContent?alt=sse&key=" + apiKey;
+        AnalysisTier effectiveTier = (tier != null) ? tier : AnalysisTier.BALANCED;
+        String cleanQuery = (query == null) ? "" : query.trim();
+        String cleanContext = (referenceContext == null || referenceContext.isBlank()) ? "[NONE]" : referenceContext.trim();
+
+        // 1. Dinamik Model Seçimi (Tier seviyesine göre taşıyıcı oluşturulur)
+        GeminiClientConfig config = new GeminiClientConfig(
+                apiKey,
+                effectiveTier.getModelName(),
+                15000,
+                90000
+        );
+        GeminiSseTransport transport = new GeminiSseTransport(config);
+
+        // 2. Dinamik Sıcaklık ve Token Bütçesi
+        double temperature = deriveDynamicTemperature(effectiveTier);
+        int maxTokens = deriveDynamicMaxTokens(effectiveTier, cleanQuery, cleanContext);
 
         String systemInstruction =
-                "MODE: ANALYTICAL_STORY_PARTNER\n" +
-                        "OUTPUT_CONTRACT: direct_analysis_only | no_polite_openers | no_sycophancy | no_unsolicited_moralizing\n" +
-                        "RULES:\n" +
-                        "- DO NOT mimic the author's punctuation rhythm, lowercase casing, or inline bracket syntax.\n" +
-                        "- DO NOT generate novel continuation or rewrite story prose.\n" +
-                        "- Analyze the provided story context strictly as reference data to answer continuity, spatial logic, character consistency, or pacing inquiries.\n" +
-                        "- Be concise, direct, and candid. Omit praise, apologies, and small talk.";
+                "MODE: OBJECTIVE_ANALYSIS_ENGINE\n" +
+                        "OUTPUT_CONTRACT: direct_analysis_only | no_preamble | no_conversational_filler | no_flattery\n\n" +
+                        "[CORE_CONSTRAINTS]\n" +
+                        "1. Treat REFERENCE_CONTEXT strictly as immutable background data.\n" +
+                        "2. DO NOT mimic the typographical rhythm, casing, or internal syntax of the reference text.\n" +
+                        "3. DO NOT generate continuation, speculative filler, or prose rewrites.\n" +
+                        "4. Provide direct, objective, and analytically rigorous answers addressing the QUERY.\n" +
+                        "5. State logical contradictions, structural gaps, or verification facts plainly without polite preambles.";
 
-        JsonObject payload = new JsonObject();
-
-        JsonObject sysInstObj = new JsonObject();
-        JsonArray sysParts = new JsonArray();
-        JsonObject sysText = new JsonObject();
-        sysText.addProperty("text", systemInstruction);
-        sysParts.add(sysText);
-        sysInstObj.add("parts", sysParts);
-        payload.add("systemInstruction", sysInstObj);
-
-        JsonArray contents = new JsonArray();
-        JsonObject userContent = new JsonObject();
-        userContent.addProperty("role", "user");
-        JsonArray userParts = new JsonArray();
-        JsonObject userText = new JsonObject();
-
-        String promptBody = "ACTIVE STORY CONTEXT:\n" +
-                (storyContext == null || storyContext.isBlank() ? "[NONE]" : storyContext) +
-                "\n\nQUERY / ANALYSIS REQUEST:\n" + query;
-
-        userText.addProperty("text", promptBody);
-        userParts.add(userText);
-        userContent.add("parts", userParts);
-        contents.add(userContent);
-        payload.add("contents", contents);
-
-        JsonObject genConfig = new JsonObject();
-        genConfig.addProperty("temperature", 0.3);
-        genConfig.addProperty("maxOutputTokens", 800);
-
-        JsonObject thinkingConfig = new JsonObject();
-        thinkingConfig.addProperty("thinkingBudget", 0);
-        genConfig.add("thinkingConfig", thinkingConfig);
-
-        payload.add("generationConfig", genConfig);
-
-        RequestBody body = RequestBody.create(
-                payload.toString(),
-                MediaType.parse("application/json; charset=utf-8")
+        String userPromptText = String.format(
+                "REFERENCE_CONTEXT:\n%s\n\nQUERY / ANALYSIS_DIRECTIVE:\n%s",
+                cleanContext,
+                cleanQuery
         );
 
-        Request request = new Request.Builder()
-                .url(endpoint)
-                .post(body)
-                .build();
+        JsonObject payload = GeminiPayloadBuilder.build(
+                systemInstruction,
+                userPromptText,
+                temperature,
+                maxTokens
+        );
 
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String err = response.body() != null ? response.body().string() : "No body";
-                throw new IOException("API Hatasi HTTP " + response.code() + ": " + err);
-            }
+        transport.postAndStream(payload, onToken);
+    }
 
-            ResponseBody responseBody = response.body();
-            if (responseBody == null) {
-                throw new IOException("HTTP yanit govdesi bos.");
-            }
-
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(responseBody.byteStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.startsWith("data: ")) {
-                        String data = line.substring(6).trim();
-                        if (data.isEmpty() || "[DONE]".equals(data)) continue;
-
-                        try {
-                            JsonObject json = gson.fromJson(data, JsonObject.class);
-                            if (json.has("candidates")) {
-                                JsonArray candidates = json.getAsJsonArray("candidates");
-                                if (!candidates.isEmpty()) {
-                                    JsonObject cand = candidates.get(0).getAsJsonObject();
-                                    if (cand.has("content")) {
-                                        JsonObject content = cand.getAsJsonObject("content");
-                                        if (content.has("parts")) {
-                                            JsonArray parts = content.getAsJsonArray("parts");
-                                            for (int i = 0; i < parts.size(); i++) {
-                                                JsonObject part = parts.get(i).getAsJsonObject();
-                                                if (part.has("text")) {
-                                                    onToken.accept(part.get("text").getAsString());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                }
-            }
+    private double deriveDynamicTemperature(AnalysisTier tier) {
+        switch (tier) {
+            case FAST: return 0.1;      // Hızlı, kesin, sıfır sapma
+            case BALANCED: return 0.2;  // Standart analitik denge
+            case DEEP:
+            default: return 0.3;        // Kapsamlı sentez ve derin çıkarım
         }
+    }
+
+    private int deriveDynamicMaxTokens(AnalysisTier tier, String query, String context) {
+        int base = (query.length() > 200 || context.length() > 2000) ? 1200 : 600;
+        if (tier == AnalysisTier.DEEP) {
+            return base * 2; // Derin analiz için bütçe genişletilir
+        }
+        return base;
     }
 }
