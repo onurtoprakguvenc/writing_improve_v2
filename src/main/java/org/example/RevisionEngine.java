@@ -11,11 +11,22 @@ import java.util.function.Consumer;
 
 /**
  * Katman 3: Yerinde Cerrahi Mutasyon Motoru.
- * İstek katmanına (AnalysisTier) göre dinamik model ve parametre tahsis eder.
+ *
+ * Belirlenen hedef metin dilimini (TARGET_PASSAGE), çevre bağlamın
+ * üslup ve sözdizimi dokusunu bozmadan yönerge doğrultusunda doğrudan yeniden yazar.
  */
 public class RevisionEngine {
 
     private final String apiKey;
+
+    public static final String SYSTEM_INSTRUCTION =
+            "You are a deterministic, zero-friction in-buffer text mutation engine. " +
+                    "Your output will atomically replace the TARGET_PASSAGE inside the active document. " +
+                    "CORE EXECUTION INVARIANTS:\n" +
+                    "1. Output ONLY the raw replacement text that directly substitutes TARGET_PASSAGE.\n" +
+                    "2. Never emit explanations, markdown code block wrappers (```), or meta-labels (e.g., 'Replacement:', 'Revision:').\n" +
+                    "3. Mirror the precise stylistic tone, syntax geometry, punctuation habits, and casing of the SURROUNDING_CONTEXT.\n" +
+                    "4. Execute the MUTATION_DIRECTIVE fully without taking lazy shortcuts or summarizing.";
 
     public RevisionEngine(String apiKey) {
         this.apiKey = apiKey;
@@ -31,62 +42,36 @@ public class RevisionEngine {
         Objects.requireNonNull(onToken, "onToken must not be null");
 
         AnalysisTier effectiveTier = (tier != null) ? tier : AnalysisTier.BALANCED;
-        String analysisSource = (surroundingContext != null && !surroundingContext.trim().isEmpty())
-                ? surroundingContext
-                : targetPassage;
+        int maxTokens = CalibrationEngine.resolveMaxOutputTokens(effectiveTier);
 
-        NarrativeState state = LocalShadowCore.analyze(analysisSource, effectiveTier);
-        String systemInstruction = buildRevisionConstraintMatrix(state);
+        String cleanTarget = (targetPassage != null) ? targetPassage.trim() : "";
+        String cleanDirective = (revisionInstruction != null && !revisionInstruction.isBlank())
+                ? revisionInstruction.trim()
+                : "Revise to improve impact while maintaining style.";
+        String cleanContext = (surroundingContext != null && !surroundingContext.isBlank())
+                ? surroundingContext.trim()
+                : "(isolated passage)";
 
         String userPrompt = String.format(
-                "TARGET_PASSAGE:\n%s\n\nREVISION_INSTRUCTION:\n%s\n\nSURROUNDING_CONTEXT (reference only, do not rewrite):\n%s",
-                nullToEmpty(targetPassage),
-                nullToEmpty(revisionInstruction),
-                nullToEmpty(surroundingContext)
+                "[SURROUNDING_CONTEXT]\n%s\n[/SURROUNDING_CONTEXT]\n\n" +
+                        "[TARGET_PASSAGE]\n%s\n[/TARGET_PASSAGE]\n\n" +
+                        "[MUTATION_DIRECTIVE]\n%s\n[/MUTATION_DIRECTIVE]\n\n" +
+                        "REPLACEMENT:",
+                cleanContext,
+                cleanTarget,
+                cleanDirective
         );
 
         JsonObject payload = GeminiPayloadBuilder.build(
-                systemInstruction,
+                SYSTEM_INSTRUCTION,
                 userPrompt,
-                state.getRecommendedTemperature(),
-                state.getRecommendedMaxTokens()
+                0.7,
+                maxTokens
         );
 
-        // Dinamik model tahsisi: Seçilen tier seviyesindeki model kullanılır
         GeminiClientConfig config = new GeminiClientConfig(apiKey, effectiveTier.getModelName(), 30000, 60000);
         GeminiSseTransport transport = new GeminiSseTransport(config);
 
         transport.postAndStream(payload, onToken);
-    }
-
-    private String buildRevisionConstraintMatrix(NarrativeState state) {
-        StringBuilder matrix = new StringBuilder();
-        matrix.append("MODE: SURGICAL_MUTATION_ENGINE\n");
-        matrix.append("OUTPUT_CONTRACT: direct_replacement_only | no_preamble | no_conversational_filler\n\n");
-        matrix.append("[PHYSICAL_CONSTRAINTS]\n");
-        matrix.append("1. Mutate ONLY the TARGET_PASSAGE. Do not append text outside target boundaries.\n");
-        matrix.append(String.format("2. Conform strictly to density metrics: ~%.1f words/sentence (variance tolerance: %.2f).\n",
-                state.getAvgWordsPerSentence(), state.getSentenceLengthStdDev()));
-        matrix.append("3. Replacement must splice seamlessly into SURROUNDING_CONTEXT without seam lines.\n");
-
-        matrix.append("[SYNTAX_GEOMETRY_CONSTRAINTS]\n");
-        if (state.hasInlineParenthetical()) {
-            matrix.append("- PRESERVE inline parenthetical syntax structure.\n");
-        }
-        if (state.hasLowercaseStarter()) {
-            matrix.append("- PRESERVE lowercase or non-capitalized starting conventions of targeted blocks.\n");
-        }
-        if (state.isPureLineDialogue()) {
-            matrix.append("- PRESERVE isolated line-delimited structural rhythm.\n");
-        }
-        if (!state.hasInlineParenthetical() && !state.hasLowercaseStarter() && !state.isPureLineDialogue()) {
-            matrix.append("- Follow the exact capitalization and block mechanics of the provided context.\n");
-        }
-
-        return matrix.toString();
-    }
-
-    private String nullToEmpty(String s) {
-        return (s == null) ? "" : s;
     }
 }

@@ -1,99 +1,71 @@
 package org.example;
 
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
  * JVM console verification harness for real-time SSE streaming.
- * Supports both CLI arguments and fallback test samples.
+ * Verifies the UnifiedPipelineRouter and pure continuation architecture.
  */
 public class Main {
 
-    // Yeni ritim ve parantez içi aksiyon test örnekleri
     private static final String DEFAULT_CONTEXT =
             "(intense fight moment)\n" +
                     "\"so sister.how does it feel to...(slices a bit of her face and drops blood)\"\n" +
                     "\"you are a mo-mo-monster.\"\n" +
-                    "\"ı know.who denies that.know,back to your back.\"";
+                    "\"i know.who denies that.know,back to your back.\"";
 
     private static final String DEFAULT_PLOT_POINT =
-            "the sister kicks her knee, grabs the dropped blade from the puddle";
+            "extend the text.the sister kicks her knee, grabs the dropped blade from the puddle.1 paragraph long";
 
     public static void main(String[] args) {
+        // Enforce UTF-8 on standard console out/err to avoid encoding mismatches
+        System.setOut(new PrintStream(System.out, true, StandardCharsets.UTF_8));
+        System.setErr(new PrintStream(System.err, true, StandardCharsets.UTF_8));
+
         String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = "gemini anahtarı gir";
+            apiKey = "AQ.Ab8RN6JzgLWbrc3Avb8Rvz8ZCrHI84JDtwUGpHX0hne-LO5_wg";
         }
 
-        if (apiKey.equals("YOUR_API_KEY_HERE") || apiKey.isBlank()) {
-            System.err.println("Hata: GEMINI_API_KEY tanımlı değil.");
+        if (apiKey.isBlank()) {
+            System.err.println("Error: GEMINI_API_KEY is not defined.");
             return;
         }
 
-        // CLI parametresi varsa onu al, yoksa test örneklerini kullan
         String context = (args.length > 0 && !args[0].isBlank()) ? args[0] : DEFAULT_CONTEXT;
         String plotPoint = (args.length > 1 && !args[1].isBlank()) ? args[1] : DEFAULT_PLOT_POINT;
         AnalysisTier tier = (args.length > 2) ? parseTier(args[2]) : AnalysisTier.BALANCED;
 
-        CalibrationEngine engine = new CalibrationEngine(apiKey);
+        UnifiedPipelineRouter router = new UnifiedPipelineRouter(apiKey);
+        EditorState state = EditorState.insertion(context, context.length());
 
-        StringBuilder aggregated = new StringBuilder();
         long startedAt = System.currentTimeMillis();
         boolean[] firstTokenReceived = {false};
 
-        System.out.println("--- Taslak Üretiliyor (Canlı Akış Başlatıldı) ---");
+        System.out.println("--- Generating Draft (Live SSE Stream Active) ---");
 
         try {
-            engine.streamNextDraft(context, plotPoint, tier, token -> {
+            EditorState updatedState = router.dispatch(plotPoint, state, tier, token -> {
                 if (!firstTokenReceived[0]) {
                     long ttfb = System.currentTimeMillis() - startedAt;
-                    System.out.println("[İlk Token Gecikmesi (TTFB): " + ttfb + "ms]");
+                    System.out.println("[First Token Latency (TTFB): " + ttfb + "ms]");
                     firstTokenReceived[0] = true;
                 }
                 System.out.print(token);
                 System.out.flush();
-                aggregated.append(token);
             });
 
             long totalMs = System.currentTimeMillis() - startedAt;
             System.out.println();
-            System.out.println("--- Akış Tamamlandı (Toplam: " + totalMs + "ms) ---");
+            System.out.println("--- Stream Completed (Total: " + totalMs + "ms) ---");
 
-            String rawOutput = aggregated.toString();
-            String polished = StructuralPolish.closeHangingSyntax(rawOutput);
-
-            if (!polished.equals(rawOutput)) {
-                System.out.println("--- Sözdizimi Düzeltmesi Uygulandı (Kapanış Eklendi) ---");
-                System.out.println(polished);
-            }
-
-            // -------------------------------------------------------------
-            // RevisionEngine Doğrulama Testi
-            // -------------------------------------------------------------
-            System.out.println("\n--- RevisionEngine Testi Başlatılıyor ---");
-            RevisionEngine revisionEngine = new RevisionEngine(apiKey);
-
-            String targetPassage = "\"ı am not done yet.(kicks her knee hard and grabs the dropped blade from the puddle)\"";
-            String revisionInstruction = "make her fingers slip on the muddy blade first, missing the grab once before securing it";
-
-            long revStartedAt = System.currentTimeMillis();
-            boolean[] revFirstTokenReceived = {false};
-
-            revisionEngine.streamRevision(targetPassage, revisionInstruction, context, tier, token -> {
-                if (!revFirstTokenReceived[0]) {
-                    long ttfb = System.currentTimeMillis() - revStartedAt;
-                    System.out.println("[Revizyon İlk Token Gecikmesi (TTFB): " + ttfb + "ms]");
-                    revFirstTokenReceived[0] = true;
-                }
-                System.out.print(token);
-                System.out.flush();
-            });
-
-            long revTotalMs = System.currentTimeMillis() - revStartedAt;
-            System.out.println();
-            System.out.println("--- Revizyon Akışı Tamamlandı (Toplam: " + revTotalMs + "ms) ---");
+            System.out.println("\n=== SPLICED BUFFER CONTENT (EDITOR STATE) ===");
+            System.out.println(updatedState.getFullManuscript());
 
         } catch (Exception e) {
-            System.err.println("Akış sırasında hata oluştu:");
+            System.err.println("Execution failure encountered:");
             e.printStackTrace();
         }
     }
@@ -101,9 +73,14 @@ public class Main {
     private static AnalysisTier parseTier(String raw) {
         if (raw == null) return AnalysisTier.BALANCED;
         switch (raw.toUpperCase(Locale.ROOT)) {
-                case "K1": return AnalysisTier.FAST;
-            case "K3": return AnalysisTier.DEEP;
-            default: return AnalysisTier.BALANCED;
+            case "K1":
+            case "FAST":
+                return AnalysisTier.FAST;
+            case "K3":
+            case "DEEP":
+                return AnalysisTier.DEEP;
+            default:
+                return AnalysisTier.BALANCED;
         }
     }
 }

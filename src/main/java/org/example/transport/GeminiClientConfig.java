@@ -7,8 +7,9 @@ public class GeminiClientConfig {
     private final int connectTimeoutMs;
     private final int readTimeoutMs;
 
+    // URL'den key parametresi söküldü
     private static final String BASE_URL_TEMPLATE =
-            "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s";
+            "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse";
 
     public GeminiClientConfig(String apiKey, String modelName) {
         this(apiKey, modelName, 30000, 60000);
@@ -16,12 +17,10 @@ public class GeminiClientConfig {
 
     public GeminiClientConfig(String apiKey, String modelName, int connectTimeoutMs, int readTimeoutMs) {
         if (apiKey != null && !apiKey.isBlank()) {
-            this.apiKey = apiKey;
+            this.apiKey = apiKey.trim();
         } else {
             String envKey = System.getenv("GEMINI_API_KEY");
-            this.apiKey = (envKey != null && !envKey.isBlank())
-                    ? envKey.trim()
-                    : "BURAYA_AI_STUDIO_API_KEY_YAPISTIR";
+            this.apiKey = (envKey != null && !envKey.isBlank()) ? envKey.trim() : "";
         }
         this.modelName = (modelName != null && !modelName.isBlank()) ? modelName : "gemini-3.8-flash";
         this.connectTimeoutMs = connectTimeoutMs;
@@ -29,7 +28,15 @@ public class GeminiClientConfig {
     }
 
     public String resolveEndpointUrl() {
-        return String.format(BASE_URL_TEMPLATE, modelName, apiKey);
+        return String.format(BASE_URL_TEMPLATE, modelName);
+    }
+
+    public String getApiKey() {
+        return apiKey;
+    }
+
+    public String getModelName() {
+        return modelName;
     }
 
     public int getConnectTimeoutMs() {

@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.function.Consumer;
@@ -28,11 +29,17 @@ public class GeminiSseTransport {
     public void postAndStream(JsonObject payload, Consumer<String> onToken) throws IOException {
         byte[] payloadBytes = payload.toString().getBytes(StandardCharsets.UTF_8);
 
-        URL url = new URL(config.resolveEndpointUrl());
+        // Modern Java URI -> URL dönüşümü (Deprecation uyarısını yok eder)
+        URL url = URI.create(config.resolveEndpointUrl()).toURL();
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         conn.setRequestProperty("Accept", "text/event-stream");
+
+        if (config.getApiKey() != null && !config.getApiKey().isBlank()) {
+            conn.setRequestProperty("x-goog-api-key", config.getApiKey());
+        }
+
         conn.setDoOutput(true);
         conn.setConnectTimeout(config.getConnectTimeoutMs());
         conn.setReadTimeout(config.getReadTimeoutMs());
@@ -56,10 +63,7 @@ public class GeminiSseTransport {
                     String jsonChunk = line.substring(5).trim();
                     if (jsonChunk.isEmpty() || "[DONE]".equals(jsonChunk)) continue;
 
-                    String text = extractText(jsonChunk);
-                    if (text != null && !text.isEmpty()) {
-                        onToken.accept(text);
-                    }
+                    processChunk(jsonChunk, onToken);
                 }
             }
         } finally {
@@ -67,30 +71,55 @@ public class GeminiSseTransport {
         }
     }
 
-    private String extractText(String jsonChunk) {
+    private void processChunk(String jsonChunk, Consumer<String> onToken) throws IOException {
         try {
             JsonObject chunkObj = gson.fromJson(jsonChunk, JsonObject.class);
-            if (!chunkObj.has("candidates")) return null;
 
-            JsonArray candidates = chunkObj.getAsJsonArray("candidates");
-            if (candidates.size() == 0) return null;
-
-            JsonObject candidate = candidates.get(0).getAsJsonObject();
-            if (!candidate.has("content")) return null;
-
-            JsonObject content = candidate.getAsJsonObject("content");
-            if (!content.has("parts")) return null;
-
-            JsonArray parts = content.getAsJsonArray("parts");
-            StringBuilder sb = new StringBuilder();
-            for (JsonElement part : parts) {
-                if (part.isJsonObject() && part.getAsJsonObject().has("text")) {
-                    sb.append(part.getAsJsonObject().get("text").getAsString());
+            if (chunkObj.has("promptFeedback")) {
+                JsonObject feedback = chunkObj.getAsJsonObject("promptFeedback");
+                if (feedback.has("blockReason")) {
+                    String reason = feedback.get("blockReason").getAsString();
+                    throw new IOException("Request blocked by prompt filter: " + reason);
                 }
             }
-            return sb.toString();
+
+            if (!chunkObj.has("candidates")) return;
+
+            JsonArray candidates = chunkObj.getAsJsonArray("candidates");
+            if (candidates.size() == 0) return;
+
+            JsonObject candidate = candidates.get(0).getAsJsonObject();
+
+            if (candidate.has("content")) {
+                JsonObject content = candidate.getAsJsonObject("content");
+                if (content.has("parts")) {
+                    JsonArray parts = content.getAsJsonArray("parts");
+                    StringBuilder sb = new StringBuilder();
+                    for (JsonElement part : parts) {
+                        if (part.isJsonObject() && part.getAsJsonObject().has("text")) {
+                            sb.append(part.getAsJsonObject().get("text").getAsString());
+                        }
+                    }
+                    String text = sb.toString();
+                    if (!text.isEmpty()) {
+                        onToken.accept(text);
+                    }
+                }
+            }
+
+            if (candidate.has("finishReason")) {
+                String finishReason = candidate.get("finishReason").getAsString();
+                if ("SAFETY".equalsIgnoreCase(finishReason)) {
+                    throw new IOException("Model halted generation due to SAFETY threshold.");
+                } else if ("RECITATION".equalsIgnoreCase(finishReason)) {
+                    throw new IOException("Model halted generation due to RECITATION check.");
+                }
+            }
+
+        } catch (IOException e) {
+            throw e;
         } catch (Exception ignored) {
-            return null;
+            // Malformed intermediate chunks safely skipped
         }
     }
 

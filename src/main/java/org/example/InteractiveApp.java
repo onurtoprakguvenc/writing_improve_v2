@@ -8,29 +8,28 @@ import java.nio.file.Path;
 import java.util.Scanner;
 
 /**
- * Günlük kullanım için bağımsız CLI çalışma alanı.
- * Metni konsoldan veya dosyadan alır, işler ve panoya kopyalayarak kapatır.
+ * Independent CLI workspace for daily drafting.
+ * Ingests text from console or file, processes it, and copies result to clipboard upon exit.
  */
 public class InteractiveApp {
 
-    private static String editorManuscript = "";
+    private static EditorState currentState;
 
     public static void main(String[] args) {
         String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = "AQ.Ab8RN6JzgLWbrc3Avb8Rvz8ZCrHI84JDtwUGpHX0hne-LO5_wg"; // Geçerli AIzaSy anahtarını buraya koy
+            apiKey = "gemini apı key";
         }
 
-        // Router başlatma: Router String alacak şekilde güncellendiğinde doğrudan apiKey'i geçirir.
         UnifiedPipelineRouter router = new UnifiedPipelineRouter(apiKey, false);
         Scanner scanner = new Scanner(System.in);
 
         System.out.println("==================================================");
-        System.out.println("         YAZAR HIZLI MÜDAHALE TERMİNALİ          ");
+        System.out.println("        WRITER RAPID INTERVENTION TERMINAL        ");
         System.out.println("==================================================");
-        System.out.println("1. Üzerinde çalışılacak metni girin.");
-        System.out.println("   (Metni yapıştırıp boş bir satırda ENTER'a basın veya doğrudan bir .txt yolu girin)");
-        System.out.print("Metin / Dosya Yolu: ");
+        System.out.println("1. Enter text to work on.");
+        System.out.println("   (Paste text and press ENTER on an empty line, or provide a .txt path directly)");
+        System.out.print("Text / File Path: ");
 
         StringBuilder initialText = new StringBuilder();
         boolean firstLine = true;
@@ -38,19 +37,19 @@ public class InteractiveApp {
         while (scanner.hasNextLine()) {
             String line = scanner.nextLine();
 
-            // İlk satırda doğrudan geçerli bir .txt dosyası girildiyse dosyayı oku ve bitir
+            // Direct file ingestion check
             if (firstLine && line.trim().endsWith(".txt") && Files.exists(Path.of(line.trim()))) {
                 try {
                     initialText.append(Files.readString(Path.of(line.trim())));
-                    System.out.println("[Dosya başarıyla yüklendi]");
+                    System.out.println("[File loaded successfully]");
                     break;
                 } catch (IOException e) {
-                    System.err.println("Dosya okunamadı: " + e.getMessage());
+                    System.err.println("Failed to read file: " + e.getMessage());
                 }
             }
             firstLine = false;
 
-            // Boş bir satır girildiğinde yapıştırma işlemi tamamlanır
+            // Empty line terminates multi-line paste
             if (line.trim().isEmpty() && initialText.length() > 0) {
                 break;
             }
@@ -58,79 +57,71 @@ public class InteractiveApp {
             initialText.append(line).append("\n");
         }
 
-        editorManuscript = initialText.toString().trim();
-        if (editorManuscript.isEmpty()) {
-            System.out.println("[Boş metin ile başlatıldı]");
+        String rawText = initialText.toString().trim();
+        int initialCursor = rawText.length();
+        currentState = new EditorState(rawText, initialCursor, -1, -1);
+
+        if (rawText.isEmpty()) {
+            System.out.println("[Initialized with empty buffer]");
         }
 
         System.out.println("\n--------------------------------------------------");
-        System.out.println("Komutlar: ':exit' (Panoya kopyalar ve çıkar), ':show', ':copy'");
+        System.out.println("Commands: ':exit' (Copy and quit), ':show', ':copy'");
         System.out.println("--------------------------------------------------");
 
         while (true) {
-            System.out.println("\n[MEVCUT SON SATIRLAR]:");
-            printLastLines(editorManuscript, 3);
-            System.out.print("\nKOMUT / PROMPT GİRİN > ");
+            System.out.println("\n[CURRENT RECENT LINES]:");
+            printLastLines(currentState.getFullManuscript(), 3);
+            System.out.print("\nCOMMAND / PROMPT > ");
 
             String input = scanner.nextLine().trim();
 
             if (input.equalsIgnoreCase(":exit")) {
-                copyToClipboard(editorManuscript);
-                System.out.println("[Nihai metin panoya kopyalandı. Program kapatılıyor.]");
+                copyToClipboard(currentState.getFullManuscript());
+                System.out.println("[Final text copied to clipboard. Exiting.]");
                 break;
             } else if (input.equalsIgnoreCase(":show")) {
-                System.out.println("\n--- TÜM EDİTÖR İÇERİĞİ ---\n" + editorManuscript + "\n--------------------------");
+                System.out.println("\n--- FULL EDITOR BUFFER ---\n" + currentState.getFullManuscript() + "\n--------------------------");
                 continue;
             } else if (input.equalsIgnoreCase(":copy")) {
-                copyToClipboard(editorManuscript);
-                System.out.println("[Mevcut metin panoya kopyalandı]");
+                copyToClipboard(currentState.getFullManuscript());
+                System.out.println("[Current text copied to clipboard]");
                 continue;
             }
 
             if (input.isEmpty()) continue;
 
-            System.out.println("\n[İşleniyor...]");
-            StringBuilder responseAccumulator = new StringBuilder();
+            System.out.println("\n[Processing...]");
             long startMs = System.currentTimeMillis();
             boolean[] firstToken = {false};
 
-            try {
-                int cursor = editorManuscript.length();
-                EditorState state = new EditorState(editorManuscript, cursor, -1, -1);
+            // Atomic rollback snapshot in case stream fails mid-flight
+            EditorState rollbackSnapshot = currentState;
 
-                router.dispatch(
+            try {
+                // Dispatch directly updates the state via DiffMergeEngine
+                currentState = router.dispatch(
                         input,
-                        state,
+                        currentState,
                         AnalysisTier.BALANCED,
                         (String token) -> {
                             if (!firstToken[0]) {
-                                System.out.println("[İlk Token: " + (System.currentTimeMillis() - startMs) + "ms]");
-                                System.out.println("--- ÇIKTI ---");
+                                System.out.println("[First Token: " + (System.currentTimeMillis() - startMs) + "ms]");
+                                System.out.println("--- OUTPUT ---");
                                 firstToken[0] = true;
                             }
                             System.out.print(token);
                             System.out.flush();
-                            responseAccumulator.append(token);
                         }
                 );
 
-                System.out.println("\n--- Tamamlandı (" + (System.currentTimeMillis() - startMs) + "ms) ---");
-
-                String generated = responseAccumulator.toString().trim();
-                if (!generated.isEmpty()) {
-                    // Askıda kalan tırnak veya parantezleri güvenli şekilde kapat
-                    generated = StructuralPolish.closeHangingSyntax(generated);
-
-                    if (!editorManuscript.isEmpty()) {
-                        editorManuscript += "\n" + generated;
-                    } else {
-                        editorManuscript = generated;
-                    }
-                    System.out.println("[Metne eklendi ve sentaks doğrulandı]");
-                }
+                System.out.println("\n--- Completed (" + (System.currentTimeMillis() - startMs) + "ms) ---");
+                System.out.println("[Buffer spliced and syntax validated]");
 
             } catch (Exception e) {
-                System.err.println("İşlem hatası: " + e.getMessage());
+                // Restore pristine state on network or parsing failure
+                currentState = rollbackSnapshot;
+                System.err.println("Execution failure (reverted to previous buffer state): " + e.getMessage());
             }
         }
 
@@ -142,13 +133,13 @@ public class InteractiveApp {
             StringSelection selection = new StringSelection(text);
             Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
         } catch (Exception ignored) {
-            // Headless ortamlarda sessizce geç
+            // Silently skip in headless runtime environments
         }
     }
 
     private static void printLastLines(String text, int maxLines) {
         if (text == null || text.isBlank()) {
-            System.out.println("  (Metin boş)");
+            System.out.println("  (Buffer is empty)");
             return;
         }
         String[] lines = text.split("\\r?\\n");

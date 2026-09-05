@@ -1,21 +1,23 @@
 package org.example;
 
+import com.google.gson.JsonObject;
+import org.example.transport.GeminiClientConfig;
+import org.example.transport.GeminiPayloadBuilder;
+import org.example.transport.GeminiSseTransport;
+
 import java.io.IOException;
 import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * Katman 1: Birleşik İş Hattı Yönlendiricisi.
- *
- * Tampon geometrisine göre rotayı belirler, dinamik bağlam penceresini
- * arabellek hacmine göre ölçekler, motor akışını yönetir ve Katman 4
- * (DiffMergeEngine) üzerinden deterministik olarak yeni EditorState üretir.
+ * Layer 1: Unified Pipeline Router.
  */
 public class UnifiedPipelineRouter {
 
-    private final CalibrationEngine calibrationEngine;
+    private final String apiKey;
     private final RevisionEngine revisionEngine;
     private final ConsultationEngine consultationEngine;
+    private final DiffMergeEngine diffMergeEngine;
     private final boolean mockMode;
 
     public UnifiedPipelineRouter(String apiKey) {
@@ -23,16 +25,13 @@ public class UnifiedPipelineRouter {
     }
 
     public UnifiedPipelineRouter(String apiKey, boolean mockMode) {
+        this.apiKey = apiKey;
         this.mockMode = mockMode;
-        this.calibrationEngine = new CalibrationEngine(apiKey);
         this.revisionEngine = new RevisionEngine(apiKey);
         this.consultationEngine = new ConsultationEngine(apiKey);
+        this.diffMergeEngine = new DiffMergeEngine();
     }
 
-    /**
-     * İş hattını yürütür, tokenları anlık akıtır ve işlem bittiğinde
-     * güncellenmiş yeni EditorState nesnesini döndürür.
-     */
     public EditorState dispatch(
             String directive,
             EditorState editorState,
@@ -55,15 +54,21 @@ public class UnifiedPipelineRouter {
         };
 
         switch (route.getTarget()) {
-            case SURGICAL_MUTATION:
+            case SURGICAL_MUTATION: {
                 if (mockMode) {
                     String mockReplacement = "[MUTATION] " + route.getTargetText();
                     tokenStreamListener.accept(mockReplacement);
-                    return DiffMergeEngine.applyReplacement(
-                            editorState,
+                    DiffMergeEngine.SpliceResult result = diffMergeEngine.applySelectionReplacementWithBoundaryCleaning(
+                            editorState.getFullManuscript(),
                             route.getTargetStart(),
                             route.getTargetEnd(),
                             mockReplacement
+                    );
+                    return new EditorState(
+                            result.getUpdatedManuscript(),
+                            result.getNewCursorPosition(),
+                            result.getNewCursorPosition(),
+                            result.getNewCursorPosition()
                     );
                 }
 
@@ -78,21 +83,27 @@ public class UnifiedPipelineRouter {
                         interceptingListener
                 );
 
-                // Cerrahi dikiş: Doğrudan rotanın çözdüğü fiziksel koordinat sınırlarını kullanır
-                return DiffMergeEngine.applyReplacement(
-                        editorState,
+                String cleanedPayload = StreamSanitizer.sanitizeFullOutput(accumulatedOutput.toString());
+                DiffMergeEngine.SpliceResult result = diffMergeEngine.applySelectionReplacementWithBoundaryCleaning(
+                        editorState.getFullManuscript(),
                         route.getTargetStart(),
                         route.getTargetEnd(),
-                        accumulatedOutput.toString()
+                        cleanedPayload
                 );
+                return new EditorState(
+                        result.getUpdatedManuscript(),
+                        result.getNewCursorPosition(),
+                        result.getNewCursorPosition(),
+                        result.getNewCursorPosition()
+                );
+            }
 
-            case NON_DESTRUCTIVE_CONSULTATION:
+            case NON_DESTRUCTIVE_CONSULTATION: {
                 if (mockMode) {
                     tokenStreamListener.accept("[CONSULTATION] " + rawDirective);
                     return editorState;
                 }
 
-                // İstişare için arabelleğin tam bağlamı kullanılır (Kör budama yapılmaz)
                 int consultationWindow = calculateConsultationWindow(editorState, selectedTier);
                 String fullContext = editorState.getPrecedingContext(consultationWindow);
 
@@ -104,54 +115,83 @@ public class UnifiedPipelineRouter {
                 );
 
                 return editorState;
+            }
 
             case LINEAR_CONTINUATION:
-            default:
+            default: {
+                int dynamicPrecedingWindow = calculateDynamicContextRadius(editorState, selectedTier);
+
                 if (mockMode) {
                     String mockContinuation = "[CONTINUATION] " + rawDirective;
                     tokenStreamListener.accept(mockContinuation);
-                    return DiffMergeEngine.applyContinuation(editorState, mockContinuation);
+                    DiffMergeEngine.SpliceResult result = diffMergeEngine.applyInsertionWithBoundaryCleaning(
+                            editorState.getFullManuscript(),
+                            editorState.getCursorPosition(),
+                            mockContinuation
+                    );
+                    return new EditorState(
+                            result.getUpdatedManuscript(),
+                            result.getNewCursorPosition(),
+                            result.getNewCursorPosition(),
+                            result.getNewCursorPosition()
+                    );
                 }
 
-                int dynamicPrecedingWindow = calculateDynamicContextRadius(editorState, selectedTier);
-                String precedingContext = editorState.getPrecedingContext(dynamicPrecedingWindow);
-
-                calibrationEngine.streamNextDraft(
-                        precedingContext,
+                CalibrationEngine.CalibratedPayload payload = CalibrationEngine.calibrate(
+                        editorState,
                         rawDirective,
-                        selectedTier,
-                        interceptingListener
+                        null,
+                        dynamicPrecedingWindow,
+                        selectedTier
                 );
 
-                return DiffMergeEngine.applyContinuation(editorState, accumulatedOutput.toString());
+                JsonObject geminiPayload = GeminiPayloadBuilder.build(
+                        payload.getSystemInstruction(),
+                        payload.getUserPrompt(),
+                        0.7,
+                        payload.getMaxOutputTokens()
+                );
+
+                GeminiClientConfig config = new GeminiClientConfig(
+                        apiKey,
+                        payload.getModelName(),
+                        30000,
+                        60000
+                );
+                GeminiSseTransport transport = new GeminiSseTransport(config);
+                transport.postAndStream(geminiPayload, interceptingListener);
+
+                String cleanedPayload = StreamSanitizer.sanitizeFullOutput(accumulatedOutput.toString());
+                DiffMergeEngine.SpliceResult result = diffMergeEngine.applyInsertionWithBoundaryCleaning(
+                        editorState.getFullManuscript(),
+                        editorState.getCursorPosition(),
+                        cleanedPayload
+                );
+                return new EditorState(
+                        result.getUpdatedManuscript(),
+                        result.getNewCursorPosition(),
+                        result.getNewCursorPosition(),
+                        result.getNewCursorPosition()
+                );
+            }
         }
     }
 
-    /**
-     * Arabelleğin toplam büyüklüğüne ve tier seviyesine göre bağlam yarıçapını hesaplar.
-     * Küçük metinleri asla budamaz; büyük tamponlarda oransal pencere açar.
-     */
     private int calculateDynamicContextRadius(EditorState state, AnalysisTier tier) {
         int totalLen = state.getManuscriptLength();
         if (totalLen <= 0) return 0;
 
         switch (tier) {
             case FAST:
-                // Hızlı akışta arabelleğin en fazla %40'ı veya minimum 3000 karakter
                 return Math.max(3000, (int) (totalLen * 0.40));
             case BALANCED:
-                // Dengeli modda metin 15.000 karaktere kadarsa tamamı, üzerindeyse %70'i
                 return (totalLen <= 15000) ? totalLen : (int) (totalLen * 0.70);
             case DEEP:
             default:
-                // Derin analizde hiçbir budama yapılmaz; tüm arabellek derin düşünceye verilir
                 return totalLen;
         }
     }
 
-    /**
-     * Salt inceleme sorgularında tam metni korur; FAST modunda bile yapay sınır dayatmaz.
-     */
     private int calculateConsultationWindow(EditorState state, AnalysisTier tier) {
         int totalLen = state.getManuscriptLength();
         if (tier == AnalysisTier.FAST && totalLen > 25000) {

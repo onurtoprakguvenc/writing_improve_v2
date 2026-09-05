@@ -1,129 +1,207 @@
 package org.example;
 
-import com.google.gson.JsonObject;
-import org.example.transport.GeminiClientConfig;
-import org.example.transport.GeminiPayloadBuilder;
-import org.example.transport.GeminiSseTransport;
-
-import java.io.IOException;
+import java.io.Serializable;
 import java.util.Objects;
-import java.util.function.Consumer;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * Katman 3: İleriye Doğru Akış Motoru (Continuation Engine).
- *
- * Sohbet formu simülasyonu yapmaz. Arabellek akışını doğrudan
- * bir sonraki bayttan itibaren devam ettirir.
+ * Deterministic Buffer Calibration & Payload Engine.
+ * <p>
+ * Replaces static token calculators, regex length heuristics, and role-playing prompt
+ * bureaucracies with a pure delimiter-based buffer continuation architecture.
  */
-public class CalibrationEngine {
+public final class CalibrationEngine {
+
+    /**
+     * Uncompromising, non-interactive execution invariant system instruction.
+     */
+    public static final String SYSTEM_INSTRUCTION =
+            "You are a deterministic in-buffer text continuation engine. " +
+                    "Output ONLY the raw continuation text that directly extends the active buffer from the last character. " +
+                    "Never output explanations, conversational filler, markdown code block wrappers (```), or meta-labels (e.g., 'Reaction:', 'Continuation:', 'Scene:'). " +
+                    "If data sections are missing or empty, proceed immediately without asking questions or pausing for clarification.";
+
+    private static final int DEFAULT_STYLE_MIN_CHARS = 500;
+    private static final int DEFAULT_STYLE_MAX_CHARS = 1000;
 
     private final String apiKey;
-    private static final Pattern LENGTH_HINT_PATTERN = Pattern.compile("(?i)\\b(\\d+)\\s*(paragraph|paragraf|sentence|cümle|page|sayfa|word|kelime)\\b");
+
+    public CalibrationEngine() {
+        this(null);
+    }
 
     public CalibrationEngine(String apiKey) {
         this.apiKey = apiKey;
     }
 
-    public void streamNextDraft(
-            String precedingContext,
-            String directive,
-            AnalysisTier tier,
-            Consumer<String> onToken
-    ) throws IOException {
-        Objects.requireNonNull(onToken, "onToken must not be null");
-
-        AnalysisTier effectiveTier = (tier != null) ? tier : AnalysisTier.BALANCED;
-        NarrativeState state = LocalShadowCore.analyze(precedingContext, effectiveTier);
-
-        int maxTokens = resolveDynamicMaxTokens(directive, state);
-        double temperature = state.getRecommendedTemperature();
-
-        // 1. Görev formu etiketleri yerine doğrudan fiziksel sınır tanımları
-        String systemInstruction = buildPureContinuationSystemInstruction();
-
-        // 2. Form doldurma şablonu (KEY: VALUE) kaldırıldı; ham bağlam ve açık talimat ayrıldı
-        String userPrompt = buildBufferExtensionPrompt(precedingContext, directive);
-
-        JsonObject payload = GeminiPayloadBuilder.build(
-                systemInstruction,
-                userPrompt,
-                temperature,
-                maxTokens
-        );
-
-        GeminiClientConfig config = new GeminiClientConfig(apiKey, effectiveTier.getModelName(), 30000, 60000);
-        GeminiSseTransport transport = new GeminiSseTransport(config);
-
-        transport.postAndStream(payload, onToken);
+    public String getApiKey() {
+        return apiKey;
     }
 
-    /**
-     * Roleplay veya kurgusal kısıt dayatmaz. Yalnızca çıktının doğrudan
-     * tampona dikileceğini ve etiket basılmaması gerektiğini dikte eder.
-     */
-    private String buildPureContinuationSystemInstruction() {
-        return "You are a deterministic text buffer continuation engine.\n"
-                + "The text you generate will be stitched directly into the user's active editor buffer starting immediately from the last character.\n"
-                + "Rules:\n"
-                + "1. Generate only the raw continuation text.\n"
-                + "2. Never output conversational pleasantries, markdown code fences, or section headers/labels (such as 'Reaction:', 'Continuation:', 'Output:').\n"
-                + "3. Adhere strictly to the requested scope and length instructed by the user.";
+    public static int resolveMaxOutputTokens(AnalysisTier tier) {
+        if (tier == null) {
+            return 4096;
+        }
+        switch (tier) {
+            case FAST:
+            case SURGICAL:
+                return 2048;
+            case DEEP:
+                return 8192;
+            case BALANCED:
+            default:
+                return 4096;
+        }
     }
 
-    /**
-     * Modeli form doldurmaya teşvik etmeyen, sınırları açık metin bağlamı.
-     */
-    private String buildBufferExtensionPrompt(String precedingContext, String directive) {
-        StringBuilder sb = new StringBuilder();
-        if (precedingContext != null && !precedingContext.isEmpty()) {
-            sb.append("--- CURRENT BUFFER START ---\n")
-                    .append(precedingContext)
-                    .append("\n--- CURRENT BUFFER END ---\n\n");
+    public static String buildPrompt(String activeBuffer, String directive, String explicitStyle) {
+        String sanitizedBuffer = sanitizeInput(activeBuffer);
+        String sanitizedDirective = sanitizeDirective(directive);
+        String resolvedStyle = resolveStyleReference(explicitStyle, sanitizedBuffer);
+
+        return "[STYLE_REFERENCE]\n" +
+                resolvedStyle + "\n" +
+                "[/STYLE_REFERENCE]\n\n" +
+                "[ACTIVE_BUFFER]\n" +
+                sanitizedBuffer + "\n" +
+                "[/ACTIVE_BUFFER]\n\n" +
+                "[DIRECTIVE]\n" +
+                sanitizedDirective + "\n" +
+                "[/DIRECTIVE]\n\n" +
+                "CONTINUATION:";
+    }
+
+    public static String buildPrompt(String activeBuffer, String directive) {
+        return buildPrompt(activeBuffer, directive, null);
+    }
+
+    public static String buildPrompt(EditorState state, String directive, int dynamicContextRadius, String explicitStyle) {
+        if (state == null) {
+            return buildPrompt("", directive, explicitStyle);
+        }
+        String activeContext = state.hasSelection()
+                ? state.getSelectedText()
+                : (dynamicContextRadius > 0 ? state.getPrecedingContext(dynamicContextRadius) : state.getFullManuscript());
+
+        return buildPrompt(activeContext, directive, explicitStyle);
+    }
+
+    public static String buildPrompt(EditorState state, String directive) {
+        return buildPrompt(state, directive, 0, null);
+    }
+
+    public static CalibratedPayload calibrate(EditorState state, String directive, AnalysisTier tier) {
+        return calibrate(state, directive, null, 0, tier);
+    }
+
+    public static CalibratedPayload calibrate(EditorState state, String directive, String explicitStyle, int dynamicContextRadius, AnalysisTier tier) {
+        AnalysisTier selectedTier = (tier != null) ? tier : AnalysisTier.BALANCED;
+        String prompt = buildPrompt(state, directive, dynamicContextRadius, explicitStyle);
+        int maxTokens = resolveMaxOutputTokens(selectedTier);
+        return new CalibratedPayload(SYSTEM_INSTRUCTION, prompt, maxTokens, selectedTier.getModelName(), selectedTier);
+    }
+
+    private static String resolveStyleReference(String explicitStyle, String activeBuffer) {
+        if (explicitStyle != null && !explicitStyle.trim().isEmpty()) {
+            return sanitizeInput(explicitStyle);
+        }
+        return extractDefaultStyle(activeBuffer);
+    }
+
+    public static String extractDefaultStyle(String buffer) {
+        if (buffer == null) {
+            return "(none)";
+        }
+        String trimmed = buffer.trim();
+        if (trimmed.isEmpty()) {
+            return "(none)";
         }
 
-        sb.append("Instruction: Continue the text from CURRENT BUFFER END, fulfilling this directive: ")
-                .append((directive != null && !directive.isEmpty()) ? directive : "continue naturally");
-
-        return sb.toString();
-    }
-
-    /**
-     * Yönergedeki uzunluk talebini analiz eder. Keyfi sabit (magic number)
-     * yerine fiziksel hacim ihtiyacını çözer.
-     */
-    private int resolveDynamicMaxTokens(String directive, NarrativeState state) {
-        if (directive == null || directive.isEmpty()) {
-            return state.getRecommendedMaxTokens();
+        if (trimmed.length() <= DEFAULT_STYLE_MAX_CHARS) {
+            return trimmed;
         }
 
-        Matcher m = LENGTH_HINT_PATTERN.matcher(directive);
-        if (m.find()) {
-            int count = Integer.parseInt(m.group(1));
-            String unit = m.group(2).toLowerCase();
-
-            switch (unit) {
-                case "paragraph":
-                case "paragraf":
-                    // Ortalama 1 paragraf ~ 150-250 token
-                    return Math.min(4096, Math.max(512, count * 350));
-                case "page":
-                case "sayfa":
-                    // 1 sayfa ~ 700-900 token
-                    return Math.min(8192, Math.max(1024, count * 1000));
-                case "sentence":
-                case "cümle":
-                    return Math.min(2048, Math.max(128, count * 40));
-                case "word":
-                case "kelime":
-                    return Math.min(4096, (int) (count * 1.5));
-                default:
-                    break;
+        int cutoff = DEFAULT_STYLE_MAX_CHARS;
+        for (int i = DEFAULT_STYLE_MAX_CHARS - 1; i >= DEFAULT_STYLE_MIN_CHARS; i--) {
+            char c = trimmed.charAt(i);
+            if (c == '\n' || c == '.' || c == '!' || c == '?') {
+                cutoff = i + 1;
+                break;
             }
         }
+        return trimmed.substring(0, cutoff).trim();
+    }
 
-        // Açık bir sayısal hacim yoksa state'in taban değerini korur
-        return Math.max(512, state.getRecommendedMaxTokens());
+    private static String sanitizeInput(String val) {
+        if (val == null) {
+            return "";
+        }
+        String s = val.trim();
+        s = s.replace("{STYLE_SAMPLE_TEXT}", "")
+                .replace("{ACTIVE_BUFFER_TEXT}", "")
+                .replace("{USER_DIRECTIVE}", "")
+                .trim();
+        return s;
+    }
+
+    private static String sanitizeDirective(String directive) {
+        String s = sanitizeInput(directive);
+        if (s.isEmpty()) {
+            return "Continue the text immediately from the last character.";
+        }
+        return s;
+    }
+
+    public static final class CalibratedPayload implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private final String systemInstruction;
+        private final String userPrompt;
+        private final int maxOutputTokens;
+        private final String modelName;
+        private final AnalysisTier tier;
+
+        public CalibratedPayload(
+                String systemInstruction,
+                String userPrompt,
+                int maxOutputTokens,
+                String modelName,
+                AnalysisTier tier
+        ) {
+            this.systemInstruction = Objects.requireNonNull(systemInstruction, "systemInstruction cannot be null");
+            this.userPrompt = Objects.requireNonNull(userPrompt, "userPrompt cannot be null");
+            this.maxOutputTokens = maxOutputTokens;
+            this.modelName = Objects.requireNonNull(modelName, "modelName cannot be null");
+            this.tier = (tier != null) ? tier : AnalysisTier.BALANCED;
+        }
+
+        public String getSystemInstruction() {
+            return systemInstruction;
+        }
+
+        public String getUserPrompt() {
+            return userPrompt;
+        }
+
+        public int getMaxOutputTokens() {
+            return maxOutputTokens;
+        }
+
+        public String getModelName() {
+            return modelName;
+        }
+
+        public AnalysisTier getTier() {
+            return tier;
+        }
+
+        @Override
+        public String toString() {
+            return "CalibratedPayload{" +
+                    "tier=" + tier +
+                    ", maxTokens=" + maxOutputTokens +
+                    ", model='" + modelName + '\'' +
+                    ", promptLength=" + userPrompt.length() +
+                    '}';
+        }
     }
 }

@@ -3,29 +3,30 @@ package org.example;
 import java.util.regex.Pattern;
 
 /**
- * Katman 2: Tampon Geometrisi ve Sentaks Ayrıştırıcı.
+ * Layer 2: Buffer Geometry and Syntax Resolver.
  *
- * Doğal dil yönergeleri ile yapısal operatörleri ayrıştırır,
- * doğrudan fiziksel koordinat rotası üretir.
+ * Separates natural language directives from discrete structural operators,
+ * generating deterministic physical coordinate routing.
  */
 public final class BufferGeometryResolver {
 
     private BufferGeometryResolver() {}
 
-    // sed operatörü: s/eski/yeni/ veya s/eski/yeni/g
+    // sed operator: s/old/new/ or s/old/new/g
     private static final Pattern SED_OPERATOR = Pattern.compile("^s/[^/]+/[^/]*/?[a-z]*$");
 
-    // Salt yapısal dönüşüm: sol taraf ve sağ taraf kısa sentaks olmalı, uzun doğal dil cümlesi olmamalı
+    // Discrete transformation: short syntax on left and right, not full paragraphs
     private static final Pattern DISCRETE_ARROW_OPERATOR = Pattern.compile("^[^\\n\\r]{1,50}\\s*(->|=>)\\s*[^\\n\\r]{1,50}$");
 
     private static final Pattern INTERROGATIVE_OR_ANALYSIS = Pattern.compile(
-            "(?i)(\\?$|(\\b(mı|mi|mu|mü|mıdır|midir|mudur|müdür|nedir|nelerdir|nasıl|neden|niçin|kim|hangi|kaç)\\b)|\\b(analiz|incele|kontrol et|tutarlı mı|açıkla|check|analyze|explain|why|how|what|who)\\b)"
+            "(\\?$|(\\b(mı|mi|mu|mü|mıdır|midir|mudur|müdür|nedir|nelerdir|nasıl|neden|niçin|kim|hangi|kaç)\\b)|\\b(analiz|incele|kontrol et|tutarlı mı|açıkla|check|analyze|explain|why|how|what|who)\\b)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
 
     public static PipelineRoute resolve(EditorState state, String rawDirective) {
         String directive = (rawDirective != null) ? rawDirective.trim() : "";
 
-        // 1. Fiziksel Vurgulama: Kullanıcı aralık seçtiyse kesinlikle mutasyondur
+        // 1. Physical Highlighting: Explicit selection enforces mutation mode
         if (state.hasSelection()) {
             return PipelineRoute.mutation(
                     state.getSelectedText(),
@@ -34,7 +35,7 @@ public final class BufferGeometryResolver {
             );
         }
 
-        // 2. Belirgin Yapısal Operatör (Sed veya Kısa Ok Sentaksı)
+        // 2. Structural Operator (Sed or short arrow notation)
         if (isStructuralOperator(directive)) {
             TextBlock block = extractPrecedingBlock(state.getFullManuscript(), state.getCursorPosition());
             if (!block.isEmpty()) {
@@ -42,12 +43,12 @@ public final class BufferGeometryResolver {
             }
         }
 
-        // 3. Salt Analitik / Soru Sentaksı: Tampona dokunulmaz
+        // 3. Interrogative or pure analytical inquiry: Buffer left untouched
         if (INTERROGATIVE_OR_ANALYSIS.matcher(directive).find()) {
             return PipelineRoute.consultation();
         }
 
-        // 4. Varsayılan Doğrusal Akış: İmleç noktasından itibaren devam
+        // 4. Default Linear Continuation: Splice forward from active cursor
         return PipelineRoute.continuation(state.getCursorPosition());
     }
 
