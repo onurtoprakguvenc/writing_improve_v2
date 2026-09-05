@@ -34,3 +34,8 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs = ['-nowarn']
     options.warnings = false
 }
+
+tasks.withType(JavaExec).configureEach {
+    jvmArgs += "-Dfile.encoding=UTF-8"
+    standardInput = System.in
+}

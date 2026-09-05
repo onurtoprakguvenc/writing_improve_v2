@@ -1,74 +1,104 @@
 package org.example;
 
+import java.util.Objects;
+import java.util.regex.Pattern;
+
 /**
- * Surgical Splice Manager.
- * <p>
- * Pure, stateless, thread-safe string mutation utility responsible for deterministically
- * merging streamed generated chunks or complete replacement blocks into the buffer.
- * <p>
- * Guarantees physical buffer immutability outside of the explicit target offset or slice.
+ * Katman 4: Deterministik Metin Birleştirme ve Cerrahi Dikiş Motoru.
+ *
+ * Açık koordinatlar üzerinden tampon birleştirmesi yapar.
+ * Seçim olsun ya da olmasın, verilen fiziksel aralığı hatasız mutate eder.
  */
 public final class DiffMergeEngine {
 
-    public DiffMergeEngine() {
-        // Stateless utility instance
+    private DiffMergeEngine() {
+    }
+
+    private static final Pattern CODE_BLOCK_FENCE = Pattern.compile("^```[a-zA-Z]*\\r?\\n?|```$", Pattern.MULTILINE);
+
+    /**
+     * EditorState içindeki mevcut seçili bölgeyi değiştirir.
+     */
+    public static EditorState applyReplacement(EditorState currentState, String replacementText) {
+        Objects.requireNonNull(currentState, "currentState must not be null");
+        return applyReplacement(currentState, currentState.getSelectionStart(), currentState.getSelectionEnd(), replacementText);
     }
 
     /**
-     * Slices and inserts a generated text chunk at the specified physical buffer offset.
-     * Guarantees prefix and suffix immutability around the insertion point.
-     *
-     * @param manuscript      The original manuscript text buffer.
-     * @param insertionOffset The character offset where insertion occurs.
-     * @param generatedChunk  The text chunk to insert.
-     * @return The resulting manuscript string with the chunk spliced in.
+     * Tampon üzerindeki açık fiziksel koordinat aralığını [start, end] yeni metinle değiştirir.
      */
-    public String applyInsertion(String manuscript, int insertionOffset, String generatedChunk) {
-        String base = (manuscript != null) ? manuscript : "";
-        String chunk = (generatedChunk != null) ? generatedChunk : "";
+    public static EditorState applyReplacement(EditorState currentState, int start, int end, String replacementText) {
+        Objects.requireNonNull(currentState, "currentState must not be null");
+        String cleanReplacement = (replacementText == null) ? "" : sanitizeSurgicalOutput(replacementText);
 
-        if (chunk.isEmpty()) {
-            return base;
+        String original = currentState.getFullManuscript();
+        int len = original.length();
+
+        int s = Math.max(0, Math.min(start, len));
+        int e = Math.max(0, Math.min(end, len));
+        int actualStart = Math.min(s, e);
+        int actualEnd = Math.max(s, e);
+
+        // Cerrahi dikiş: [0...actualStart] + cleanReplacement + [actualEnd...len]
+        StringBuilder buffer = new StringBuilder(original.length() + cleanReplacement.length());
+        buffer.append(original, 0, actualStart);
+        buffer.append(cleanReplacement);
+        buffer.append(original, actualEnd, len);
+
+        int newCursor = actualStart + cleanReplacement.length();
+        return new EditorState(buffer.toString(), newCursor, newCursor, newCursor);
+    }
+
+    /**
+     * İmleç noktasına yeni akışı ekler.
+     */
+    public static EditorState applyContinuation(EditorState currentState, String continuationText) {
+        Objects.requireNonNull(currentState, "currentState must not be null");
+        String cleanContinuation = (continuationText == null) ? "" : sanitizeSurgicalOutput(continuationText);
+
+        String original = currentState.getFullManuscript();
+        int cursor = Math.max(0, Math.min(currentState.getCursorPosition(), original.length()));
+
+        StringBuilder buffer = new StringBuilder(original.length() + cleanContinuation.length());
+        buffer.append(original, 0, cursor);
+        buffer.append(cleanContinuation);
+        buffer.append(original, cursor, original.length());
+
+        int newCursor = cursor + cleanContinuation.length();
+        return new EditorState(buffer.toString(), newCursor, newCursor, newCursor);
+    }
+
+    /**
+     * Dış tırnakları ve sızan markdown bloklarını temizler.
+     */
+    /**
+     * Dış tırnakları, sızan markdown bloklarını ve kapatılmamış / boş parantezleri temizler.
+     */
+    public static String sanitizeSurgicalOutput(String text) {
+        if (text == null || text.isBlank()) return "";
+        String sanitized = CODE_BLOCK_FENCE.matcher(text.trim()).replaceAll("").trim();
+
+        if (sanitized.length() >= 2) {
+            // Tamamen tırnak içindeyse dış tırnakları at
+            if ((sanitized.startsWith("\"") && sanitized.endsWith("\"")) ||
+                    (sanitized.startsWith("\u201C") && sanitized.endsWith("\u201D"))) {
+                sanitized = sanitized.substring(1, sanitized.length() - 1).trim();
+            }
         }
 
-        int offset = clamp(insertionOffset, 0, base.length());
-        StringBuilder sb = new StringBuilder(base.length() + chunk.length());
-        sb.append(base, 0, offset);
-        sb.append(chunk);
-        sb.append(base, offset, base.length());
-        return sb.toString();
-    }
+        // Boş parantezleri temizle
+        sanitized = sanitized.replace("()", "").trim();
 
-    /**
-     * Surgically replaces the physical slice [start, end] in the manuscript buffer
-     * with the replacement text.
-     * <p>
-     * All characters before 'start' and after 'end' remain physically invariant.
-     *
-     * @param manuscript  The original manuscript text buffer.
-     * @param start       The start offset of the range to replace (inclusive).
-     * @param end         The end offset of the range to replace (exclusive).
-     * @param replacement The replacement text to splice in.
-     * @return The resulting manuscript string with the slice atomically replaced.
-     */
-    public String applySelectionReplacement(String manuscript, int start, int end, String replacement) {
-        String base = (manuscript != null) ? manuscript : "";
-        String rep = (replacement != null) ? replacement : "";
+        // Eğer açılmış ama kapatılmamış parantez varsa (veya sadece sonda asılı kalmışsa) temizle
+        if (sanitized.startsWith("(") && !sanitized.endsWith(")")) {
+            sanitized = sanitized.substring(1).trim();
+        } else if (sanitized.endsWith(")") && !sanitized.contains("(")) {
+            sanitized = sanitized.substring(0, sanitized.length() - 1).trim();
+        } else if (sanitized.startsWith("(") && sanitized.endsWith(")")) {
+            // Eğer tamamı parantez içindeyse parantezleri kaldır (düz metne dönüştür)
+            sanitized = sanitized.substring(1, sanitized.length() - 1).trim();
+        }
 
-        int len = base.length();
-        int s = clamp(Math.min(start, end), 0, len);
-        int e = clamp(Math.max(start, end), 0, len);
-
-        StringBuilder sb = new StringBuilder(len - (e - s) + rep.length());
-        sb.append(base, 0, s);
-        sb.append(rep);
-        sb.append(base, e, len);
-        return sb.toString();
-    }
-
-    private static int clamp(int val, int min, int max) {
-        if (val < min) return min;
-        if (val > max) return max;
-        return val;
+        return sanitized;
     }
 }

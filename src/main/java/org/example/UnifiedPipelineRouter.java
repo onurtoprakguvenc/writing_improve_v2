@@ -3,13 +3,13 @@ package org.example;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
 
 /**
- * Katman 1: Birleşik İş Hattı Yönlendiricisi (Unified Pipeline Router).
+ * Katman 1: Birleşik İş Hattı Yönlendiricisi.
  *
- * Dinamik bağlam boyutu hesaplar, motorları tek tip API imzasıyla yönetir
- * ve istişare/analiz ayrımını yapısal sentaks analiziyle gerçekleştirir.
+ * Tampon geometrisine göre rotayı belirler, dinamik bağlam penceresini
+ * arabellek hacmine göre ölçekler, motor akışını yönetir ve Katman 4
+ * (DiffMergeEngine) üzerinden deterministik olarak yeni EditorState üretir.
  */
 public class UnifiedPipelineRouter {
 
@@ -18,10 +18,9 @@ public class UnifiedPipelineRouter {
     private final ConsultationEngine consultationEngine;
     private final boolean mockMode;
 
-    // Soru ve analiz niyetlerini dilden bağımsız olarak yakalayan yapısal kalıp
-    private static final Pattern INTERROGATIVE_OR_ANALYSIS_PATTERN = Pattern.compile(
-            "(?i)(\\?$|(\\b(mı|mi|mu|mü|mıdır|midir|mudur|müdür|nedir|nelerdir|nasıl|neden|niçin|kim|hangi|kaç)\\b)|\\b(analiz|incele|kontrol et|tutarlı mı|açıkla|check|analyze|explain|why|how|what|who)\\b)"
-    );
+    public UnifiedPipelineRouter(String apiKey) {
+        this(apiKey, false);
+    }
 
     public UnifiedPipelineRouter(String apiKey, boolean mockMode) {
         this.mockMode = mockMode;
@@ -30,7 +29,11 @@ public class UnifiedPipelineRouter {
         this.consultationEngine = new ConsultationEngine(apiKey);
     }
 
-    public void dispatch(
+    /**
+     * İş hattını yürütür, tokenları anlık akıtır ve işlem bittiğinde
+     * güncellenmiş yeni EditorState nesnesini döndürür.
+     */
+    public EditorState dispatch(
             String directive,
             EditorState editorState,
             AnalysisTier tier,
@@ -42,78 +45,118 @@ public class UnifiedPipelineRouter {
         AnalysisTier selectedTier = (tier != null) ? tier : AnalysisTier.BALANCED;
         String rawDirective = (directive != null) ? directive.trim() : "";
 
-        // 1. Durum: Arabellekte aktif bir seçim aralığı varsa -> Doğrudan Yerinde Mutasyon
-        if (editorState.hasSelection()) {
-            if (mockMode) {
-                tokenStreamListener.accept("[MUTATION_SELECTION] " + editorState.getSelectedText().trim());
-                return;
-            }
+        PipelineRoute route = BufferGeometryResolver.resolve(editorState, rawDirective);
+        StringBuilder accumulatedOutput = new StringBuilder();
 
-            int contextRadius = deriveDynamicContextRadius(selectedTier);
-            String surroundingContext = editorState.getSurroundingContext(contextRadius);
+        Consumer<String> interceptingListener = token -> {
+            String sanitized = StreamSanitizer.sanitizeChunk(token);
+            accumulatedOutput.append(sanitized);
+            tokenStreamListener.accept(sanitized);
+        };
 
-            revisionEngine.streamRevision(
-                    editorState.getSelectedText(),
-                    rawDirective,
-                    surroundingContext,
-                    selectedTier,
-                    tokenStreamListener
-            );
-            return;
+        switch (route.getTarget()) {
+            case SURGICAL_MUTATION:
+                if (mockMode) {
+                    String mockReplacement = "[MUTATION] " + route.getTargetText();
+                    tokenStreamListener.accept(mockReplacement);
+                    return DiffMergeEngine.applyReplacement(
+                            editorState,
+                            route.getTargetStart(),
+                            route.getTargetEnd(),
+                            mockReplacement
+                    );
+                }
+
+                int contextRadius = calculateDynamicContextRadius(editorState, selectedTier);
+                String surroundingContext = editorState.getSurroundingContext(contextRadius);
+
+                revisionEngine.streamRevision(
+                        route.getTargetText(),
+                        rawDirective,
+                        surroundingContext,
+                        selectedTier,
+                        interceptingListener
+                );
+
+                // Cerrahi dikiş: Doğrudan rotanın çözdüğü fiziksel koordinat sınırlarını kullanır
+                return DiffMergeEngine.applyReplacement(
+                        editorState,
+                        route.getTargetStart(),
+                        route.getTargetEnd(),
+                        accumulatedOutput.toString()
+                );
+
+            case NON_DESTRUCTIVE_CONSULTATION:
+                if (mockMode) {
+                    tokenStreamListener.accept("[CONSULTATION] " + rawDirective);
+                    return editorState;
+                }
+
+                // İstişare için arabelleğin tam bağlamı kullanılır (Kör budama yapılmaz)
+                int consultationWindow = calculateConsultationWindow(editorState, selectedTier);
+                String fullContext = editorState.getPrecedingContext(consultationWindow);
+
+                consultationEngine.streamConsultation(
+                        rawDirective,
+                        fullContext,
+                        selectedTier,
+                        tokenStreamListener
+                );
+
+                return editorState;
+
+            case LINEAR_CONTINUATION:
+            default:
+                if (mockMode) {
+                    String mockContinuation = "[CONTINUATION] " + rawDirective;
+                    tokenStreamListener.accept(mockContinuation);
+                    return DiffMergeEngine.applyContinuation(editorState, mockContinuation);
+                }
+
+                int dynamicPrecedingWindow = calculateDynamicContextRadius(editorState, selectedTier);
+                String precedingContext = editorState.getPrecedingContext(dynamicPrecedingWindow);
+
+                calibrationEngine.streamNextDraft(
+                        precedingContext,
+                        rawDirective,
+                        selectedTier,
+                        interceptingListener
+                );
+
+                return DiffMergeEngine.applyContinuation(editorState, accumulatedOutput.toString());
         }
-
-        // 2. Durum: Seçim yok ve yönerge bir soru, mantık denetimi veya analiz talebi içeriyorsa -> İstişare Motoru
-        if (isAnalyticalOrInterrogative(rawDirective)) {
-            if (mockMode) {
-                tokenStreamListener.accept("[CONSULTATION] " + rawDirective);
-                return;
-            }
-
-            int dynamicWindow = deriveDynamicContextRadius(selectedTier) * 2;
-            String fullContext = editorState.getPrecedingContext(dynamicWindow);
-
-            consultationEngine.streamConsultation(
-                    rawDirective,
-                    fullContext,
-                    selectedTier,
-                    tokenStreamListener
-            );
-            return;
-        }
-
-        // 3. Durum: Seçim yok ve soru değilse -> İmleç noktasından itibaren ileriye doğru akış
-        if (mockMode) {
-            tokenStreamListener.accept("[CONTINUATION] " + rawDirective);
-            return;
-        }
-
-        int dynamicPrecedingWindow = deriveDynamicContextRadius(selectedTier);
-        String precedingContext = editorState.getPrecedingContext(dynamicPrecedingWindow);
-
-        calibrationEngine.streamNextDraft(
-                precedingContext,
-                rawDirective,
-                selectedTier,
-                tokenStreamListener
-        );
     }
 
-    private boolean isAnalyticalOrInterrogative(String directive) {
-        if (directive == null || directive.isBlank()) {
-            return false;
-        }
-        return INTERROGATIVE_OR_ANALYSIS_PATTERN.matcher(directive).find();
-    }
+    /**
+     * Arabelleğin toplam büyüklüğüne ve tier seviyesine göre bağlam yarıçapını hesaplar.
+     * Küçük metinleri asla budamaz; büyük tamponlarda oransal pencere açar.
+     */
+    private int calculateDynamicContextRadius(EditorState state, AnalysisTier tier) {
+        int totalLen = state.getManuscriptLength();
+        if (totalLen <= 0) return 0;
 
-    private int deriveDynamicContextRadius(AnalysisTier tier) {
         switch (tier) {
             case FAST:
-                return 2500;   // Düşük gecikme ve dar odak
+                // Hızlı akışta arabelleğin en fazla %40'ı veya minimum 3000 karakter
+                return Math.max(3000, (int) (totalLen * 0.40));
             case BALANCED:
-                return 6000;   // Standart dengeli arabellek penceresi
+                // Dengeli modda metin 15.000 karaktere kadarsa tamamı, üzerindeyse %70'i
+                return (totalLen <= 15000) ? totalLen : (int) (totalLen * 0.70);
             case DEEP:
             default:
-                return 16000;  // Derin bağlamsal akıl yürütme penceresi
+                // Derin analizde hiçbir budama yapılmaz; tüm arabellek derin düşünceye verilir
+                return totalLen;
         }
+    }
+
+    /**
+     * Salt inceleme sorgularında tam metni korur; FAST modunda bile yapay sınır dayatmaz.
+     */
+    private int calculateConsultationWindow(EditorState state, AnalysisTier tier) {
+        int totalLen = state.getManuscriptLength();
+        if (tier == AnalysisTier.FAST && totalLen > 25000) {
+            return 25000;
+        }
+        return totalLen;
     }
 }

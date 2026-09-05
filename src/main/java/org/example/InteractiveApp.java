@@ -18,7 +18,7 @@ public class InteractiveApp {
     public static void main(String[] args) {
         String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = "geçici"; // Geçerli AIzaSy anahtarını buraya koy
+            apiKey = "AQ.Ab8RN6JzgLWbrc3Avb8Rvz8ZCrHI84JDtwUGpHX0hne-LO5_wg"; // Geçerli AIzaSy anahtarını buraya koy
         }
 
         // Router başlatma: Router String alacak şekilde güncellendiğinde doğrudan apiKey'i geçirir.
